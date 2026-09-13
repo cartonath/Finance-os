@@ -1,17 +1,16 @@
-Finance OS v1.4.0 — GitHub Mobile READY
-
-Build: 2026-09-13.1
+Finance OS v1.5.0 — GitHub Mobile READY
+Build: 2026-09-13.2
 Canal: Stable
 
-Arquivos deste pacote devem ficar TODOS na raiz do repositório GitHub Pages.
-Substitua os arquivos antigos pelos novos. Não apague seus dados: os dados financeiros ficam no IndexedDB do navegador/aparelho, não dentro destes arquivos do site.
+Substitua TODOS os arquivos antigos pelos arquivos deste pacote na raiz do repositório GitHub Pages.
+Os dados financeiros continuam no IndexedDB do aparelho/navegador.
 
 Mudanças principais:
-- identidade própria do Finance OS (ícone R$; sem CN/CartoNath)
-- versão/build visíveis em Ajustes
-- cache do service worker versionado e atualizado
-- cadastro de gasto/entrada mais rápido
-- data de hoje automática em “Mais opções”
-- forma de pagamento em botões rápidos
-- cartão aparece somente para Crédito
-- favicon e ícone de instalação atualizados
+- novo Parcelamento / dívida: informe valor de CADA parcela + quantidade + qual é a próxima + próximo vencimento
+- parcelamentos externos separados dos cartões próprios
+- estados: Pago, A pagar, Atrasado e A definir
+- conta recorrente de valor variável pode nascer em R$ 0 (A definir)
+- cada mês de uma conta variável pode ter valor e data próprios
+- opção avançada de repetição na 1ª segunda-feira do mês
+- regras avançadas ficam em “Mais opções” para não poluir a tela
+- cache sincronizado com v1.5.0
