@@ -1,4 +1,4 @@
-const APP_META=Object.freeze({version:'1.6.1',build:'2026-09-13.4',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.6.2',build:'2026-09-13.5',channel:'Stable'});
 const C=FinanceCore;
 
 const PIN_KEY='finance-os-pin-v1';
