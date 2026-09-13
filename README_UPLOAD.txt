@@ -1,14 +1,15 @@
-Finance OS v1.6.4 — GitHub Mobile READY
-Build: 2026-09-13.7
+Finance OS v1.6.5 — GitHub Mobile READY
+Build: 2026-09-13.8
 Canal: Stable
 
 Substitua TODOS os 9 arquivos da raiz do repositório GitHub Pages pelos arquivos deste pacote.
 Os dados financeiros permanecem no IndexedDB do aparelho/navegador.
 
 Mudanças principais:
-- Conta/dívida pode ser pagamento único ou parcelado; não exige mais 2x.
-- Em dívida parcelada já em andamento, é possível registrar que a parcela anterior já foi paga neste mês.
-- A parcela paga aparece no mês real do pagamento; a próxima continua projetada no vencimento informado.
-- Exemplo: 9/12 paga em setembro + próxima 10/12 em outubro.
-- Categorias continuam fora da experiência normal.
-- Cache sincronizado com v1.6.4 build 2026-09-13.7.
+- A Home virou um retrato do mês selecionado: pago, a pagar, atrasado e a definir aparecem juntos.
+- Verde = pago; vermelho = atrasado; neutro = a pagar; amarelo = a definir.
+- Parcelas futuras não invadem o mês atual.
+- Se você cadastrar que a próxima parcela vence no futuro e é N/total, a parcela N-1 já vencida é inferida como paga automaticamente.
+- Removido o checkbox “já paguei a parcela anterior”.
+- Início volta para o mês atual; setas em “Contas de…” permitem consultar outros meses.
+- Cache sincronizado com v1.6.5 build 2026-09-13.8.

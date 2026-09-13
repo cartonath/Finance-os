@@ -44,3 +44,15 @@ body{background:
 @media(max-width:430px){.simple-actions button{min-height:112px;padding:16px 9px}.simple-actions button:last-child{min-height:84px}.card-account{display:block}.card-account>.amount{display:block;margin-top:8px}}
 
 .toggle-row{display:flex!important;grid-template-columns:none!important;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--line);border-radius:14px;background:#0b281e;color:var(--text)!important}.toggle-row input{width:22px!important;height:22px;flex:0 0 22px;accent-color:var(--green)}.toggle-row span{display:grid;gap:2px}.toggle-row b{color:var(--text)}.toggle-row small{color:var(--muted)}
+
+/* v1.6.5 — leitura mensal imediata */
+.month-accounts-head{align-items:center}
+.month-accounts-head .month-switch{flex-shrink:0}
+.month-now{font-size:.72rem!important;font-weight:800;color:var(--green)!important;padding:0 6px!important}
+.month-item{transition:background .15s ease,border-color .15s ease}
+.month-item.month-paid{background:linear-gradient(145deg,#153e2d,#0d2d21);border-color:#3e7c5d}
+.month-item.month-late{background:linear-gradient(145deg,#3a1d1d,#281414);border-color:#7f3d3d}
+.month-item.month-open{background:linear-gradient(145deg,#0c281e,#092018);border-color:#22503c}
+.month-item.month-define{background:linear-gradient(145deg,#332c17,#252012);border-color:#68572b}
+.status-paid{color:#a8f5c1;font-weight:800}.status-late{color:#ffaaaa;font-weight:800}.status-open{color:var(--muted);font-weight:800}.status-define{color:#ffe49d;font-weight:800}
+@media(max-width:430px){.month-accounts-head{align-items:flex-start}.month-accounts-head h2{max-width:58%}.month-now{display:none}.month-item{align-items:flex-start}.month-item .move-side{min-width:118px}}
