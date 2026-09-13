@@ -1,5 +1,5 @@
 {
-  "name": "Finance OS",
+  "name": "Finance OS — Controle Financeiro",
   "short_name": "Finance OS",
   "start_url": "./",
   "scope": "./",
@@ -19,5 +19,7 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
-  ]
+  ],
+  "description": "Controle financeiro pessoal local-first, simples e privado.",
+  "id": "./"
 }
