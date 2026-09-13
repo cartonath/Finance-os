@@ -1,4 +1,4 @@
-Finance OS v1.2.0 — GitHub Mobile READY
+Finance OS v1.3.0 — GitHub Mobile READY
 
 Build: 2026-09-13.1
 Canal: Stable
