@@ -13,3 +13,5 @@ Mudanças principais:
 - Removido o checkbox “já paguei a parcela anterior”.
 - Início volta para o mês atual; setas em “Contas de…” permitem consultar outros meses.
 - Cache sincronizado com v1.6.6 build 2026-09-13.9.
+
+CORREÇÃO v1.6.9: o card principal não soma valores já pagos ao que ainda falta pagar. O cálculo usa somente o saldo ainda disponível das entradas (nunca negativo) menos as contas pendentes do mês.
