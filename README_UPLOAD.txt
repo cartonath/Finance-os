@@ -1,17 +1,15 @@
-Finance OS v1.6.6 — GitHub Mobile READY
-Build: 2026-09-13.9
-Canal: Stable
+FINANCE OS v1.7.4 — SALDO VIVO
+Build: 2026-09-18.01
 
-Substitua TODOS os 9 arquivos da raiz do repositório GitHub Pages pelos arquivos deste pacote.
-Os dados financeiros permanecem no IndexedDB do aparelho/navegador.
+Substitua os 9 arquivos do repositório pelos arquivos deste ZIP.
 
-Mudanças principais:
-- A Home virou um retrato do mês selecionado: pago, a pagar, atrasado e a definir aparecem juntos.
-- Verde = pago; vermelho = atrasado; neutro = a pagar; amarelo = a definir.
-- Parcelas futuras não invadem o mês atual.
-- Se você cadastrar que a próxima parcela vence no futuro e é N/total, a parcela N-1 já vencida é inferida como paga automaticamente.
-- Removido o checkbox “já paguei a parcela anterior”.
-- Início volta para o mês atual; setas em “Contas de…” permitem consultar outros meses.
-- Cache sincronizado com v1.6.6 build 2026-09-13.9.
+Correção principal:
+- Depois que “Disponível agora” é definido, novas entradas somam automaticamente ao saldo.
+- Gastos/pagamentos à vista, débito, Pix e outros meios não-cartão descontam automaticamente.
+- Compras no crédito NÃO descontam o saldo na compra; a saída ocorre quando a fatura é marcada como paga.
+- Desmarcar pagamento de conta/fatura desfaz a alteração correspondente no saldo.
+- Editar/excluir lançamentos criados após a última reconciliação desfaz o efeito antigo e aplica o novo.
+- Reajustar manualmente “Disponível agora” cria uma nova base e impede que lançamentos anteriores sejam reaplicados depois.
 
-CORREÇÃO v1.7.0: o card principal não soma valores já pagos ao que ainda falta pagar. O cálculo usa somente o saldo ainda disponível das entradas (nunca negativo) menos as contas pendentes do mês.
+IMPORTANTE AO MIGRAR DA 1.7.3:
+A 1.7.3 não registrava quando o saldo manual foi definido. Por segurança, a 1.7.4 não tenta recalcular retroativamente lançamentos antigos, pois isso poderia duplicar dinheiro. Faça uma única reconciliação manual do saldo real após atualizar; daí em diante ele acompanha as novas movimentações sozinho.
