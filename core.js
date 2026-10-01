@@ -126,6 +126,18 @@
     return d>terms.closingDay?addMonths(purchaseDate,1):purchaseDate;
   }
 
+  function cardCloseDateForCycle(k,card){
+    const terms=cardTermsForCycle(card,k),day=Math.min(terms.closingDay,Number(monthEnd(k).slice(8)));
+    return `${k}-${pad(day)}`;
+  }
+
+  function cardCloseDateForDueDate(dueDate,card){
+    const dueK=ym(dueDate),close=Math.max(1,Math.min(31,Number(card?.closingDay)||31)),due=Math.max(1,Math.min(31,Number(card?.dueDay)||1));
+    const closeMonth=due<=close?addMonths(dueK+'-01',-1).slice(0,7):dueK;
+    const day=Math.min(close,Number(monthEnd(closeMonth).slice(8)));
+    return `${closeMonth}-${pad(day)}`;
+  }
+
   function cardDueDateForCycle(k,card){
     const [y,m]=k.split('-').map(Number);
     const terms=cardTermsForCycle(card,k),close=terms.closingDay,due=terms.dueDay;
@@ -133,6 +145,20 @@
     const target=due<=close?addMonths(base,1):base;
     const tk=ym(target),day=Math.min(due,Number(monthEnd(tk).slice(8)));
     return `${tk}-${pad(day)}`;
+  }
+
+  function invoiceIsClosed(card,cycle,today=ymd(),dueDate=''){
+    if(invoiceIsPaid(card,cycle)) return true;
+    const marker=card?.invoiceClosed?.[cycle];
+    // v1.8.1: only explicit manual-close records override the calendar.
+    // Legacy boolean flags were created by old "adjust invoice" flows and can be stale
+    // after the card closing day is corrected, so they are intentionally ignored here.
+    if(marker&&typeof marker==='object'&&marker.manual===true) return true;
+    // For the displayed invoice, the current card settings are authoritative. This makes
+    // changing "fecha dia" synchronize the open/closed badge immediately, even when an
+    // older cycle key still carries the amount/override for the same due month.
+    const closeDate=dueDate?cardCloseDateForDueDate(dueDate,card):cardCloseDateForCycle(cycle,card);
+    return today>=closeDate;
   }
 
   function cardStatement(data,card,k){
@@ -212,7 +238,7 @@
   const api={
     SCHEMA_VERSION,APP_NAME,uid,toCents,money,ym,ymd,addMonths,monthEnd,
     installmentSchedule,recurringOccurrence,monthProjection,categoryBreakdown,remainingInstallments,firstWeekdayOfMonth,
-    cardTermsForCycle,cardCycleDate,cardDueDateForCycle,cardStatement,cardCycleKeys,invoiceIsPaid,invoicePaidAmount,cardOutstandingCents,
+    cardTermsForCycle,cardCycleDate,cardCloseDateForCycle,cardCloseDateForDueDate,cardDueDateForCycle,cardStatement,cardCycleKeys,invoiceIsPaid,invoiceIsClosed,invoicePaidAmount,cardOutstandingCents,
     createBackupEnvelope,validateBackupEnvelope
   };
   if(typeof module!=='undefined'&&module.exports) module.exports=api;

@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_META=Object.freeze({version:'1.8.0',build:'2026-10-01.02',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.8.1',build:'2026-10-01.03',channel:'Stable'});
 const C=FinanceCore;
 const DB='finance-os-db';
 const DB_VERSION=5;
@@ -301,7 +301,7 @@ function cardCyclesForDueMonth(card,k=currentMonth){
 }
 function invoiceCycleForDueMonth(card,k=currentMonth){
   const rows=cardCyclesForDueMonth(card,k);
-  return (rows.find(x=>C.invoiceIsPaid(card,x.cycle)||card.invoiceClosed?.[x.cycle]||x.st.overridden||x.st.totalCents>0)||rows[0]||{cycle:k}).cycle;
+  return (rows.find(x=>C.invoiceIsPaid(card,x.cycle)||x.st.overridden||x.st.totalCents>0)||rows[0]||{cycle:k}).cycle;
 }
 function invoicePayment(card,cycle){return card.invoicePayments?.[cycle]||null}
 function invoiceDisplayAmount(card,cycle,st){return C.invoiceIsPaid(card,cycle)?C.invoicePaidAmount(card,cycle,st.totalCents):st.totalCents}
@@ -309,7 +309,7 @@ function invoiceDisplayAmount(card,cycle,st){return C.invoiceIsPaid(card,cycle)?
 function monthSimpleSummary(){
   const p=C.monthProjection(state,currentMonth);
   const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,currentMonth)
-    .filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||card.invoiceClosed?.[x.cycle])
+    .filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||x.st.overridden)
     .map(x=>({card,cycle:x.cycle,statement:x.st})));
   const cardDue=invoices.filter(x=>!C.invoiceIsPaid(x.card,x.cycle)).reduce((s,x)=>s+(Number(x.statement.totalCents)||0),0);
   const cardPaid=invoices.filter(x=>C.invoiceIsPaid(x.card,x.cycle)).reduce((s,x)=>s+C.invoicePaidAmount(x.card,x.cycle,x.statement.totalCents),0);
@@ -372,11 +372,12 @@ function renderHomeCards(){
   const cards=activeCards();
   if(!cards.length){el.innerHTML='<button type="button" class="cards-empty-compact" id="emptyAddCard"><span>Nenhum cartão cadastrado</span><b>+ adicionar</b></button>';$('#emptyAddCard').onclick=()=>openNewCard();return}
   el.innerHTML=cards.map(card=>{
-    const v=currentCardView(card),paid=C.invoiceIsPaid(card,v.cycle),closed=!!(card.invoiceClosed?.[v.cycle]||v.st.overridden),amount=invoiceDisplayAmount(card,v.cycle,v.st);
+    const v=currentCardView(card),paid=C.invoiceIsPaid(card,v.cycle),closed=C.invoiceIsClosed(card,v.cycle,C.ymd(),v.st.dueDate),amount=invoiceDisplayAmount(card,v.cycle,v.st);
     const outstanding=C.cardOutstandingCents(state,card),available=Math.max(0,(Number(card.limitCents)||0)-outstanding);
     const badge=paid?['PAGA','paid']:closed?['FECHADA','closed']:['ABERTA',''];
+    const closeDate=C.cardCloseDateForDueDate(v.st.dueDate,card),closeLabel=new Date(closeDate+'T12:00:00').toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}),dueLabel=new Date(v.st.dueDate+'T12:00:00').toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'});
     return `<button type="button" class="home-card-row" data-home-card="${esc(card.id)}">
-      <span class="home-card-main"><b>${esc(card.name)}</b><span class="card-badge ${badge[1]}">${badge[0]}</span><small>vence ${new Date(v.st.dueDate+'T12:00:00').toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'})} • limite livre ${C.money(available)}</small></span>
+      <span class="home-card-main"><b>${esc(card.name)}</b><span class="card-badge ${badge[1]}">${badge[0]}</span><small>fecha ${closeLabel} • vence ${dueLabel} • limite livre ${C.money(available)}</small></span>
       <span class="home-card-side"><strong>${C.money(amount)}</strong><small>Próx. ${C.money(v.next.totalCents)}</small></span>
     </button>`;
   }).join('');
@@ -396,7 +397,7 @@ function renderUpcoming(){
   // Only commitments belong on Home. Ad-hoc purchases stay in Histórico.
   const actual=p.transactions.filter(x=>['expense','investment'].includes(x.type)&&!x.cardId&&(x.recurringId||x.purchaseId)).map(x=>({...x,kind:'actual',paid:true,number:x.installmentNumber||x.number||0,count:x.count||state.installments.find(i=>i.id===x.purchaseId)?.count||0}));
   const planned=p.planned.filter(x=>['expense','investment'].includes(x.type)&&!x.cardId).map(x=>({...x,kind:'planned',paid:false}));
-  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,currentMonth).filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||card.invoiceClosed?.[x.cycle]).map(x=>({
+  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,currentMonth).filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||x.st.overridden).map(x=>({
     kind:'card',cardId:card.id,cycle:x.cycle,date:x.st.dueDate,description:card.name,
     amountCents:invoiceDisplayAmount(card,x.cycle,x.st),paid:C.invoiceIsPaid(card,x.cycle),detail:card.archivedAt?'Fatura • cartão arquivado':'Fatura',type:'expense'
   })));
@@ -629,7 +630,7 @@ async function saveClosedInvoice(e){
   e.preventDefault();const card=state.cards.find(x=>x.id===$('#invoiceCard').value&&!x.archivedAt&&!x.deletedAt);if(!card)return alert('Escolha um cartão.');
   const amount=C.toCents($('#invoiceAmount').value),due=$('#invoiceDueDate').value;if(amount<0||!due)return alert('Confira valor e vencimento.');
   const cycle=cycleForDueDate(card,due);if(C.invoiceIsPaid(card,cycle))return alert('Essa fatura já está paga. Desmarque o pagamento antes de alterar o valor.');
-  await putOne('cards',{...card,invoiceOverrides:{...(card.invoiceOverrides||{}),[cycle]:amount},invoiceClosed:{...(card.invoiceClosed||{}),[cycle]:true},updatedAt:nowIso()});
+  await putOne('cards',{...card,invoiceOverrides:{...(card.invoiceOverrides||{}),[cycle]:amount},invoiceClosed:{...(card.invoiceClosed||{}),[cycle]:{manual:true,closedAt:nowIso()}},updatedAt:nowIso()});
   close('invoiceDialog');e.target.reset();await refresh();showToast(`Fatura ${card.name} salva no vencimento correto.`);
 }
 async function adjustInvoice(id,forcedCycle=''){
@@ -638,10 +639,10 @@ async function adjustInvoice(id,forcedCycle=''){
   const st=C.cardStatement(state,card,cycle),label=fmtMonth(C.ym(st.dueDate));
   const v=prompt(`Valor real da fatura ${card.name} que vence em ${label} (${new Date(st.dueDate+'T12:00:00').toLocaleDateString('pt-BR')}).\n\nCalculado pelas compras: ${C.money(st.calculatedCents)}\n\nDigite o valor real ou deixe vazio para voltar ao automático:`,st.overridden?(st.totalCents/100).toFixed(2).replace('.',','):'');
   if(v===null)return;
-  const overrides={...(card.invoiceOverrides||{})},closed={...(card.invoiceClosed||{})};
-  if(!String(v).trim()){delete overrides[cycle];delete closed[cycle]}
-  else{const cents=C.toCents(v);if(cents<0)return alert('Informe um valor válido.');overrides[cycle]=cents;closed[cycle]=true}
-  await putOne('cards',{...card,invoiceOverrides:overrides,invoiceClosed:closed,updatedAt:nowIso()});await refresh();showToast(`Fatura ${card.name} de ${label} atualizada.`);
+  const overrides={...(card.invoiceOverrides||{})};
+  if(!String(v).trim())delete overrides[cycle];
+  else{const cents=C.toCents(v);if(cents<0)return alert('Informe um valor válido.');overrides[cycle]=cents}
+  await putOne('cards',{...card,invoiceOverrides:overrides,updatedAt:nowIso()});await refresh();showToast(`Fatura ${card.name} de ${label} atualizada.`);
 }
 
 function openCardActions(id){
@@ -859,5 +860,5 @@ function bind(){
   await loadState();
   bind();updatePinStatus();refreshCardSelects();renderHome();
   document.body.dataset.appReady='1';if(pinConfig())lockApp();
-  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.8.0',{updateViaCache:'none'}).catch(console.warn);
+  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.8.1',{updateViaCache:'none'}).catch(console.warn);
 })().catch(e=>{console.error('BOOT_FATAL',e);document.body.dataset.appReady='0';alert('O Finance OS não conseguiu iniciar. Seus dados locais permanecem no aparelho. Atualize para a correção mais recente.')});

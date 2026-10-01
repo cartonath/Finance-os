@@ -1,5 +1,5 @@
-FINANCE OS v1.8.0 — ENGINE HARDENING + VISUAL REFRESH
-Build 2026-10-01.02
+FINANCE OS v1.8.1 — CARD CLOSING SYNC + ENGINE HARDENING
+Build 2026-10-01.03
 
 Substitua os 9 arquivos da raiz do repositório pelos arquivos deste ZIP.
 O GitHub Actions já configurado deve publicar automaticamente após o commit.
@@ -27,3 +27,11 @@ Compatibilidade:
 - Backups antigos v1/v2 continuam aceitos, desde que tenham todas as coleções obrigatórias.
 - Compra parcelada no cartão agora gera um registro resumido no Histórico sem duplicar o valor da fatura.
 - Editar/excluir essa compra mantém Histórico e parcelamento sincronizados.
+
+Correção v1.8.1:
+- Status ABERTA/FECHADA agora é calculado pela data real de fechamento do ciclo.
+- Alterar 'fecha dia' sincroniza imediatamente o status da fatura atual quando o ciclo atual é afetado.
+- Flags booleanas antigas de 'fatura fechada' deixaram de forçar status incorreto após editar o cartão.
+- Ajustar o valor da fatura não a marca mais como fechada.
+- Entrada manual pelo fluxo 'fatura fechada' continua podendo marcar fechamento manual explicitamente.
+- Cards agora exibem a data de fechamento e vencimento lado a lado.
