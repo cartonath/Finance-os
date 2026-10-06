@@ -7,10 +7,10 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-  <link rel="manifest" href="manifest.webmanifest?v=1.8.1">
-  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png?v=1.8.1">
-  <link rel="apple-touch-icon" href="./icon-192.png?v=1.8.1">
-  <link rel="stylesheet" href="styles.css?v=1.8.1">
+  <link rel="manifest" href="manifest.webmanifest?v=1.9.0">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png?v=1.9.0">
+  <link rel="apple-touch-icon" href="./icon-192.png?v=1.9.0">
+  <link rel="stylesheet" href="styles.css?v=1.9.0">
   <title>Finance OS</title>
 </head>
 <body>
@@ -49,9 +49,10 @@
         <button class="metric metric-balance" id="availableMetricBtn" type="button">
           <span id="availableMetricLabel">💵 Saldo hoje</span>
           <strong id="incomeMetric">—</strong>
-          <small id="availableMetricHelp">toque para ajustar</small>
+          <small id="availableMetricHelp">toque para reconciliar</small>
         </button>
         <article class="metric metric-due"><span>🧾 A pagar</span><strong id="committedMetric">—</strong><small>contas ainda abertas</small></article>
+        <button class="metric metric-reserved" id="reservedMetricBtn" type="button"><span>🔒 Reservado</span><strong id="reservedMetric">R$ 0,00</strong><small>cofres e metas</small></button>
         <article class="metric metric-paid"><span>✓ Pago no mês</span><strong id="expenseMetric">—</strong><small>histórico já quitado</small></article>
       </div>
 
@@ -94,8 +95,31 @@
     </section>
 
     <section id="view-analysis" class="view">
-      <div class="section-head page-head"><div><span class="section-eyebrow">LEITURA</span><h1>Análises</h1></div></div>
+      <div class="section-head page-head"><div><span class="section-eyebrow">LEITURA</span><h1>Análises</h1></div><div class="month-switch"><button id="analysisPrevMonth" aria-label="Mês anterior">‹</button><strong id="analysisMonth">—</strong><button id="analysisNextMonth" aria-label="Próximo mês">›</button></div></div>
       <div class="analysis-card"><span>Resumo do mês</span><p id="analysisText"></p></div>
+
+      <div class="section-head"><div><span class="section-eyebrow">PLANEJAMENTO</span><h2>Próximos 90 dias</h2></div></div>
+      <div class="projection-grid">
+        <article><span>30 dias</span><strong id="projection30">—</strong></article>
+        <article><span>60 dias</span><strong id="projection60">—</strong></article>
+        <article><span>90 dias</span><strong id="projection90">—</strong></article>
+      </div>
+      <div id="projectionList" class="timeline-card"></div>
+
+      <div class="section-head"><div><span class="section-eyebrow">DECISÃO</span><h2>Antes de gastar</h2></div></div>
+      <button id="openSimulatorBtn" class="analysis-action">
+        <span><b>Simular “e se?”</b><small>Compra, parcela ou entrada sem salvar nada</small></span><strong>›</strong>
+      </button>
+
+      <div class="section-head"><div><span class="section-eyebrow">METAS</span><h2>Cofres</h2></div><button id="openVaultsBtn" class="link">gerenciar</button></div>
+      <div id="vaultSummaryList" class="vault-summary"></div>
+
+      <div class="section-head"><div><span class="section-eyebrow">FECHAMENTO</span><h2>Congelar o mês</h2></div></div>
+      <div class="analysis-card month-close-card">
+        <p id="monthCloseStatus">—</p>
+        <button id="monthCloseBtn" class="secondary wide">Fechar mês</button>
+      </div>
+
       <div class="section-head"><div><span class="section-eyebrow">ENTRADAS</span><h2>De onde entrou dinheiro</h2></div></div>
       <div id="incomeSources" class="card-stack"></div>
     </section>
@@ -129,6 +153,7 @@
         <button id="manageRecurringBtn" class="row-btn">Contas fixas e recorrentes <span>›</span></button>
         <button id="manageInstallmentsBtn" class="row-btn">Compras parceladas e dívidas <span>›</span></button>
         <button id="manageInvestmentsBtn" class="row-btn">Reservas e investimentos <span>›</span></button>
+        <button id="manageVaultsBtn" class="row-btn">Cofres e metas <span>›</span></button>
         <button id="manageCardsBtn" class="row-btn">Cartões <span>›</span></button>
         <button id="newCardBtn" class="row-btn">Cadastrar cartão <span>＋</span></button>
       </div>
@@ -171,8 +196,10 @@
     <div class="sheet-head"><div><span class="eyebrow">Saldo real</span><h2>Quanto você tem disponível hoje?</h2></div><button type="button" data-close="balanceDialog" class="icon">×</button></div>
     <div class="sheet-body">
       <p class="helper-copy">É o dinheiro que você realmente pode usar agora em conta, Pix ou espécie. Não é salário nem renda do mês.</p>
-      <label class="amount-field">Saldo disponível<input id="balanceAmount" class="money-input" inputmode="numeric" placeholder="0,00" required></label>
-      <button class="primary">Atualizar saldo</button>
+      <div id="balanceCurrentInfo" class="reconcile-current"></div>
+      <label class="amount-field">Saldo real agora<input id="balanceAmount" class="money-input" inputmode="numeric" placeholder="0,00" required></label>
+      <div id="balanceComparison" class="reconcile-preview"></div>
+      <button class="primary">Reconciliar saldo</button>
     </div>
   </form>
 </dialog>
@@ -220,7 +247,39 @@
 <dialog id="listDialog" class="sheet"><div class="sheet-head"><div><span class="eyebrow">Cadastros</span><h2 id="listTitle"></h2></div><button data-close="listDialog" class="icon">×</button></div><div class="sheet-body"><div id="listContent" class="card-stack"></div></div></dialog>
 <dialog id="quickActionsDialog" class="sheet"><div class="sheet-head"><div><span class="eyebrow">Ação rápida</span><h2 id="quickActionsTitle">O que deseja fazer?</h2></div><button data-close="quickActionsDialog" class="icon">×</button></div><div id="quickActionsBody" class="sheet-body action-list"></div></dialog>
 
-<script src="core.js?v=1.8.1"></script>
-<script src="app.js?v=1.8.1"></script>
+
+<dialog id="vaultDialog" class="sheet">
+  <div class="sheet-head"><div><span class="eyebrow">Metas</span><h2>Cofres</h2></div><button type="button" data-close="vaultDialog" class="icon">×</button></div>
+  <div class="sheet-body">
+    <p class="helper-copy">Cofre é dinheiro que existe no seu saldo, mas você decidiu não gastar. Ele reduz o “Livre de verdade”.</p>
+    <div id="vaultList" class="vault-list"></div>
+    <form id="vaultForm" class="vault-form">
+      <input id="vaultEditId" type="hidden">
+      <label>Nome do cofre<input id="vaultName" placeholder="Ex.: Emergência" required></label>
+      <div class="two"><label>Meta<input id="vaultTarget" class="money-input" inputmode="numeric" placeholder="0,00"></label><label>Já reservado<input id="vaultSaved" class="money-input" inputmode="numeric" placeholder="0,00" required></label></div>
+      <button class="primary">Salvar cofre</button>
+    </form>
+  </div>
+</dialog>
+
+<dialog id="simulatorDialog" class="sheet compact-sheet">
+  <form id="simulatorForm">
+    <div class="sheet-head"><div><span class="eyebrow">Simulação</span><h2>E se eu fizer isso?</h2></div><button type="button" data-close="simulatorDialog" class="icon">×</button></div>
+    <div class="sheet-body">
+      <p class="helper-copy">Nada aqui é salvo. Serve só para ver o impacto antes de decidir.</p>
+      <label>Tipo<select id="simType"><option value="cash">Gastar agora</option><option value="credit">Comprar no cartão</option><option value="income">Receber dinheiro</option></select></label>
+      <label class="amount-field">Valor<input id="simAmount" class="money-input" inputmode="numeric" placeholder="0,00" required></label>
+      <div id="simCreditFields" class="hidden">
+        <label>Cartão<select id="simCard"></select></label>
+        <label>Parcelas<input id="simInstallments" type="number" min="1" max="120" value="1"></label>
+      </div>
+      <button class="secondary wide" type="submit">Calcular impacto</button>
+      <div id="simResult" class="sim-result"></div>
+    </div>
+  </form>
+</dialog>
+
+<script src="core.js?v=1.9.0"></script>
+<script src="app.js?v=1.9.0"></script>
 </body>
 </html>

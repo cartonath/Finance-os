@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_META=Object.freeze({version:'1.8.1',build:'2026-10-01.03',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.9.0',build:'2026-10-06.01',channel:'Stable'});
 const C=FinanceCore;
 const DB='finance-os-db';
 const DB_VERSION=5;
@@ -10,6 +10,10 @@ const LEGACY_LIVE_BALANCE_KEY='finance-os-live-balance-v1';
 const LEGACY_LIVE_EPOCH_KEY='finance-os-live-epoch-v1';
 const META_LIVE_BALANCE='liveBalance';
 const META_MIGRATION='migration-v1.8.0';
+const META_VAULTS='vaults-v1';
+const META_BALANCE_LOG='balance-reconciliations-v1';
+const META_BACKUP_STATUS='backup-status-v1';
+const META_MONTH_CLOSE_PREFIX='month-close:';
 
 const incomeSources=[
   ['salario','💼 Salário'],['particular','🧠 Atendimento particular'],['tiktok','🎵 TikTok Shop'],
@@ -78,6 +82,21 @@ function metaByKey(key){return state.meta.find(x=>x.key===key)||null}
 function liveBalanceRecord(){const x=metaByKey(META_LIVE_BALANCE);return x&&Number.isFinite(Number(x.amountCents))?x:null}
 function getAvailableBalance(){return liveBalanceRecord()?.amountCents??null}
 function getAvailableEpoch(){return liveBalanceRecord()?.epoch||''}
+function vaultRecord(){const x=metaByKey(META_VAULTS);return x&&Array.isArray(x.items)?x:{key:META_VAULTS,items:[]}}
+function vaultItems(){return vaultRecord().items.filter(x=>x&&!x.archivedAt)}
+function reservedTotal(){return vaultItems().reduce((s,x)=>s+Math.max(0,Number(x.savedCents)||0),0)}
+function balanceLogRecord(){const x=metaByKey(META_BALANCE_LOG);return x&&Array.isArray(x.entries)?x:{key:META_BALANCE_LOG,entries:[]}}
+function backupStatusRecord(){return metaByKey(META_BACKUP_STATUS)||{key:META_BACKUP_STATUS}}
+function monthCloseKey(k){return META_MONTH_CLOSE_PREFIX+k}
+function monthCloseRecord(k){const x=metaByKey(monthCloseKey(k));return x&&x.month===k?x:null}
+function isMonthClosed(k){return !!monthCloseRecord(k)}
+function assertMonthOpen(k,action='alterar este mês'){
+  if(!isMonthClosed(k))return true;
+  alert(`Este mês foi fechado. Reabra ${fmtMonth(k)} em Análises antes de ${action}.`);
+  return false;
+}
+function addDaysIso(dateStr,days){const [y,m,d]=dateStr.split('-').map(Number),x=new Date(y,m-1,d+days);return C.ymd(x)}
+function daysBetweenIso(a,b){const [ay,am,ad]=a.split('-').map(Number),[by,bm,bd]=b.split('-').map(Number);return Math.round((new Date(by,bm-1,bd)-new Date(ay,am-1,ad))/86400000)}
 
 async function atomicPutWithBalance(store,obj,delta=0,expectedEpoch=''){
   const tx=db.transaction([store,'meta'],'readwrite');
@@ -306,9 +325,13 @@ function invoiceCycleForDueMonth(card,k=currentMonth){
 function invoicePayment(card,cycle){return card.invoicePayments?.[cycle]||null}
 function invoiceDisplayAmount(card,cycle,st){return C.invoiceIsPaid(card,cycle)?C.invoicePaidAmount(card,cycle,st.totalCents):st.totalCents}
 
-function monthSimpleSummary(){
-  const p=C.monthProjection(state,currentMonth);
-  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,currentMonth)
+function monthSimpleSummary(k=currentMonth){
+  const closed=monthCloseRecord(k),todayMonth=C.ym(C.ymd());
+  if(closed&&k<todayMonth&&closed.summary){
+    return {...closed.summary,p:C.monthProjection(state,k),mode:'past',closed:true,snapshot:closed,available:null,balance:null,reserved:0};
+  }
+  const p=C.monthProjection(state,k);
+  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,k)
     .filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||x.st.overridden)
     .map(x=>({card,cycle:x.cycle,statement:x.st})));
   const cardDue=invoices.filter(x=>!C.invoiceIsPaid(x.card,x.cycle)).reduce((s,x)=>s+(Number(x.statement.totalCents)||0),0);
@@ -318,15 +341,16 @@ function monthSimpleSummary(){
   const paid=paidCash+p.investmentActual+cardPaid;
   const dueCash=p.planned.filter(x=>x.type==='expense'&&!x.cardId).reduce((s,x)=>s+(Number(x.amountCents)||0),0);
   const due=dueCash+p.investmentPlanned+cardDue;
-  const todayMonth=C.ym(C.ymd()),mode=currentMonth===todayMonth?'current':currentMonth>todayMonth?'future':'past';
-  const available=getAvailableBalance();
-  const balance=mode==='current'&&available!==null?available-due:null;
-  return {p,invoices,cardDue,cardPaid,received,paid,due,dueCash,available,balance,mode};
+  const mode=k===todayMonth?'current':k>todayMonth?'future':'past';
+  const available=mode==='current'?getAvailableBalance():null;
+  const reserved=mode==='current'?reservedTotal():0;
+  const balance=mode==='current'&&available!==null?available-due-reserved:null;
+  return {p,invoices,cardDue,cardPaid,received,paid,due,dueCash,available,balance,reserved,mode,closed:false};
 }
 
 function renderHome(){
   let m;
-  try{m=monthSimpleSummary()}catch(e){console.error('Resumo do mês falhou',e);m={received:0,paid:0,due:0,available:null,balance:null,mode:'current'}}
+  try{m=monthSimpleSummary()}catch(e){console.error('Resumo do mês falhou',e);m={received:0,paid:0,due:0,available:null,balance:null,reserved:0,mode:'current'}}
   $('#monthLabel').textContent=fmtMonth(currentMonth);
   const current=m.mode==='current',future=m.mode==='future';
   $('#balanceHero').disabled=!current;
@@ -339,24 +363,25 @@ function renderHome(){
     if(m.available===null){
       $('#balanceLabel').textContent='Saldo disponível hoje';$('#freeMoney').textContent='R$ —';$('#freeMoney').classList.remove('negative');
       $('#freeHint').textContent='Toque para informar quanto dinheiro você realmente tem hoje. O app não vai adivinhar.';
-      $('#incomeMetric').textContent='Definir';$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para informar';
+      $('#incomeMetric').textContent='Definir';$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para reconciliar';
     }else{
-      $('#balanceLabel').textContent=m.balance>=0?'Livre depois das contas':'Falta para cobrir as contas';
+      $('#balanceLabel').textContent=m.balance>=0?'Livre de verdade':'Falta para cobrir tudo';
       $('#freeMoney').textContent=C.money(Math.abs(m.balance));$('#freeMoney').classList.toggle('negative',m.balance<0);
-      $('#freeHint').textContent=`${C.money(m.available)} disponíveis hoje • ${C.money(m.due)} ainda a pagar.`;
-      $('#incomeMetric').textContent=C.money(m.available);$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para ajustar';
+      $('#freeHint').textContent=`${C.money(m.available)} em mãos • ${C.money(m.due)} a pagar • ${C.money(m.reserved)} reservado.`;
+      $('#incomeMetric').textContent=C.money(m.available);$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para reconciliar';
     }
   }else if(future){
     $('#heroKicker').textContent='PRÓXIMO PERÍODO';$('#balanceLabel').textContent='Previsto para pagar';$('#freeMoney').textContent=C.money(m.due);$('#freeMoney').classList.remove('negative');
     $('#freeHint').textContent=`Compromissos previstos para ${fmtMonth(currentMonth)}. Seu saldo de hoje não é projetado para o futuro.`;
     $('#availableMetricLabel').textContent='💰 Entradas registradas';$('#incomeMetric').textContent=C.money(m.received);$('#availableMetricHelp').textContent='não é previsão';
   }else{
-    $('#heroKicker').textContent='HISTÓRICO';$('#balanceLabel').textContent='Pago no mês';$('#freeMoney').textContent=C.money(m.paid);$('#freeMoney').classList.remove('negative');
-    $('#freeHint').textContent=`O que ficou registrado como quitado em ${fmtMonth(currentMonth)}.`;
-    $('#availableMetricLabel').textContent='💰 Entradas registradas';$('#incomeMetric').textContent=C.money(m.received);$('#availableMetricHelp').textContent='histórico';
+    $('#heroKicker').textContent=m.closed?'MÊS FECHADO':'HISTÓRICO';$('#balanceLabel').textContent='Pago no mês';$('#freeMoney').textContent=C.money(m.paid);$('#freeMoney').classList.remove('negative');
+    $('#freeHint').textContent=m.closed?`Resumo congelado em ${new Date(m.snapshot.closedAt).toLocaleDateString('pt-BR')}. Reabra em Análises para alterar.`:`O que ficou registrado como quitado em ${fmtMonth(currentMonth)}.`;
+    $('#availableMetricLabel').textContent='💰 Entradas registradas';$('#incomeMetric').textContent=C.money(m.received);$('#availableMetricHelp').textContent=m.closed?'resumo congelado':'histórico';
   }
   $('#committedMetric').textContent=C.money(m.due);
   $('#expenseMetric').textContent=C.money(m.paid);
+  if($('#reservedMetric'))$('#reservedMetric').textContent=C.money(reservedTotal());
   renderHomeCards();
   renderUpcoming();
 }
@@ -391,17 +416,28 @@ function itemStatus(x,today=C.ymd()){
   return {label:'A pagar',cls:'status-open',cardCls:'month-open'};
 }
 
-function renderUpcoming(){
-  const p=C.monthProjection(state,currentMonth),today=C.ymd();
-  $('#homeAccountsTitle').textContent=`Contas de ${fmtMonth(currentMonth)}`;
-  // Only commitments belong on Home. Ad-hoc purchases stay in Histórico.
-  const actual=p.transactions.filter(x=>['expense','investment'].includes(x.type)&&!x.cardId&&(x.recurringId||x.purchaseId)).map(x=>({...x,kind:'actual',paid:true,number:x.installmentNumber||x.number||0,count:x.count||state.installments.find(i=>i.id===x.purchaseId)?.count||0}));
+function buildLedgerRows(k=currentMonth){
+  const p=C.monthProjection(state,k),actual=p.transactions.filter(x=>['expense','investment'].includes(x.type)&&!x.cardId&&(x.recurringId||x.purchaseId)).map(x=>({...x,kind:'actual',paid:true,number:x.installmentNumber||x.number||0,count:x.count||state.installments.find(i=>i.id===x.purchaseId)?.count||0}));
   const planned=p.planned.filter(x=>['expense','investment'].includes(x.type)&&!x.cardId).map(x=>({...x,kind:'planned',paid:false}));
-  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,currentMonth).filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||x.st.overridden).map(x=>({
+  const invoices=allCards().flatMap(card=>cardCyclesForDueMonth(card,k).filter(x=>x.st.totalCents>0||C.invoiceIsPaid(card,x.cycle)||x.st.overridden).map(x=>({
     kind:'card',cardId:card.id,cycle:x.cycle,date:x.st.dueDate,description:card.name,
     amountCents:invoiceDisplayAmount(card,x.cycle,x.st),paid:C.invoiceIsPaid(card,x.cycle),detail:card.archivedAt?'Fatura • cartão arquivado':'Fatura',type:'expense'
   })));
-  const rows=[...actual,...planned,...invoices].sort((a,b)=>a.date.localeCompare(b.date)||String(a.description||'').localeCompare(String(b.description||''),'pt-BR'));
+  return [...actual,...planned,...invoices].sort((a,b)=>a.date.localeCompare(b.date)||String(a.description||'').localeCompare(String(b.description||''),'pt-BR'));
+}
+
+function renderUpcoming(){
+  const today=C.ymd(),closed=monthCloseRecord(currentMonth);
+  $('#homeAccountsTitle').textContent=`Contas de ${fmtMonth(currentMonth)}`;
+  if(closed&&currentMonth<C.ym(today)&&Array.isArray(closed.rows)){
+    const rows=closed.rows;
+    if(!rows.length){$('#upcomingList').innerHTML=`<div class="month-empty"><b>Mês fechado sem compromissos</b><small>Fechado em ${new Date(closed.closedAt).toLocaleDateString('pt-BR')}.</small></div>`;return}
+    $('#upcomingList').innerHTML=rows.map(x=>`<div class="ledger-row ${esc(x.cardCls||'')} closed-ledger-row">
+      <span class="ledger-main"><b>${esc(x.description||'Sem descrição')}${x.number&&x.count?` <em>${x.number}/${x.count}</em>`:''}</b><small>${esc(x.dateLabel||'')}${x.detail?` · ${esc(x.detail)}`:''}</small></span>
+      <span class="ledger-side"><strong>${C.money(x.amountCents)}</strong><small class="${esc(x.statusCls||'')}">${esc(x.statusLabel||'')}</small></span>
+    </div>`).join('');return;
+  }
+  const rows=buildLedgerRows(currentMonth);
   if(!rows.length){$('#upcomingList').innerHTML=`<div class="month-empty"><b>Nada para pagar em ${esc(fmtMonth(currentMonth))}</b><small>Compras avulsas ficam no Histórico; aqui entram contas, parcelas e faturas.</small></div>`;return}
   $('#upcomingList').innerHTML=rows.map(x=>{
     const st=itemStatus(x,today),num=x.number||x.installmentNumber||0,count=x.count||0,needsValue=!!(x.needsValue||x.amountCents<=0);
@@ -494,14 +530,79 @@ function renderMovements(){
   $$('[data-edit]').forEach(b=>b.onclick=()=>editTx(b.dataset.edit));$$('[data-del]').forEach(b=>b.onclick=()=>deleteTx(b.dataset.del));
 }
 
+function projection90Data(){
+  const today=C.ymd(),end=addDaysIso(today,90),months=[];
+  let k=C.ym(today);
+  while(k<=C.ym(end)){months.push(k);k=C.ym(C.addMonths(k+'-01',1))}
+  const rows=[];
+  for(const month of months){
+    for(const x of buildLedgerRows(month)){
+      if(x.paid||Number(x.amountCents)<=0)continue;
+      const effectiveDate=x.date<today?today:x.date;
+      if(effectiveDate<=end)rows.push({...x,effectiveDate});
+    }
+  }
+  rows.sort((a,b)=>a.effectiveDate.localeCompare(b.effectiveDate)||String(a.description||'').localeCompare(String(b.description||''),'pt-BR'));
+  const totalWithin=days=>rows.filter(x=>daysBetweenIso(today,x.effectiveDate)<=days).reduce((s,x)=>s+(Number(x.amountCents)||0),0);
+  return {rows,p30:totalWithin(30),p60:totalWithin(60),p90:totalWithin(90)};
+}
+
+function renderProjection(){
+  const d=projection90Data();
+  $('#projection30').textContent=C.money(d.p30);$('#projection60').textContent=C.money(d.p60);$('#projection90').textContent=C.money(d.p90);
+  const rows=d.rows.slice(0,8);
+  $('#projectionList').innerHTML=rows.length?rows.map(x=>`<div class="timeline-row"><span><b>${esc(new Date(x.effectiveDate+'T12:00:00').toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}))}</b><small>${esc(x.description||'Compromisso')}</small></span><strong>${C.money(x.amountCents)}</strong></div>`).join(''):`<div class="empty-state"><b>Nada pendente nos próximos 90 dias</b><small>Quando houver conta, parcela ou fatura, ela aparece aqui.</small></div>`;
+}
+
+function renderVaultSummary(){
+  const items=vaultItems(),el=$('#vaultSummaryList');if(!el)return;
+  if(!items.length){el.innerHTML='<button type="button" class="analysis-action" id="emptyVaultAction"><span><b>Nenhum cofre ainda</b><small>Separe dinheiro sem tirá-lo do saldo bancário</small></span><strong>＋</strong></button>';$('#emptyVaultAction').onclick=openVaults;return}
+  el.innerHTML=items.map(v=>{const target=Math.max(0,Number(v.targetCents)||0),saved=Math.max(0,Number(v.savedCents)||0),pct=target?Math.min(100,Math.round(saved/target*100)):100;return `<button type="button" class="vault-card" data-vault-open="${esc(v.id)}"><span><b>🔒 ${esc(v.name)}</b><small>${target?`${C.money(saved)} de ${C.money(target)}`:`${C.money(saved)} reservado`}</small></span><span class="vault-progress"><i style="width:${pct}%"></i></span></button>`}).join('');
+  $$('[data-vault-open]').forEach(b=>b.onclick=openVaults);
+}
+
+function renderMonthCloseStatus(){
+  const el=$('#monthCloseStatus'),btn=$('#monthCloseBtn');if(!el||!btn)return;
+  const todayMonth=C.ym(C.ymd()),rec=monthCloseRecord(currentMonth);
+  if(currentMonth>=todayMonth){
+    el.textContent=currentMonth===todayMonth?'O mês atual ainda está em andamento. O fechamento fica disponível quando virar o mês.':'Mês futuro não pode ser fechado.';
+    btn.disabled=true;btn.textContent='Fechamento indisponível';btn.onclick=null;return;
+  }
+  btn.disabled=false;
+  if(rec){
+    el.textContent=`${fmtMonth(currentMonth)} foi fechado em ${new Date(rec.closedAt).toLocaleString('pt-BR')}. O resumo e a lista de compromissos estão congelados.`;
+    btn.textContent='Reabrir mês';btn.onclick=()=>reopenMonth(currentMonth);
+  }else{
+    const m=monthSimpleSummary(currentMonth);
+    el.textContent=`Ao fechar, o Finance OS congela o resumo e os compromissos de ${fmtMonth(currentMonth)}. Pendências abertas também ficam registradas.`;
+    btn.textContent=`Fechar ${fmtMonth(currentMonth)}`;btn.onclick=()=>closeMonth(currentMonth,m);
+  }
+}
+
+async function closeMonth(k,summary=monthSimpleSummary(k)){
+  if(k>=C.ym(C.ymd()))return alert('Só é possível fechar um mês que já terminou.');
+  if(monthCloseRecord(k))return;
+  if(!confirm(`Fechar ${fmtMonth(k)}? Depois disso, alterações nesse mês ficam bloqueadas até você reabrir.`))return;
+  const rows=buildLedgerRows(k).map(x=>{const st=itemStatus(x,C.monthEnd(k));return {description:x.description||'',amountCents:Number(x.amountCents)||0,date:x.date||'',dateLabel:x.date?new Date(x.date+'T12:00:00').toLocaleDateString('pt-BR',{day:'2-digit',month:'2-digit'}):'',paid:!!x.paid,detail:x.detail||'',number:x.number||x.installmentNumber||0,count:x.count||0,statusLabel:st.label,statusCls:st.cls,cardCls:st.cardCls}});
+  const record={key:monthCloseKey(k),month:k,closedAt:nowIso(),summary:{received:summary.received,paid:summary.paid,due:summary.due,cardDue:summary.cardDue,cardPaid:summary.cardPaid},rows};
+  await putOne('meta',record);await refresh();renderAnalysis();showToast(`${fmtMonth(k)} fechado.`);
+}
+
+async function reopenMonth(k){
+  if(!monthCloseRecord(k))return;
+  if(!confirm(`Reabrir ${fmtMonth(k)}? O mês volta a aceitar alterações.`))return;
+  await atomicOps([{store:'meta',type:'delete',key:monthCloseKey(k)}]);await refresh();renderAnalysis();showToast(`${fmtMonth(k)} reaberto.`);
+}
+
 function renderAnalysis(){
-  const m=monthSimpleSummary(),p=C.monthProjection(state,currentMonth);
-  if(m.mode==='current')$('#analysisText').textContent=m.available===null?`Você já pagou ${C.money(m.paid)} e ainda falta pagar ${C.money(m.due)}. Defina seu saldo de hoje para saber quanto fica livre depois das contas.`:`Você tem ${C.money(m.available)} disponíveis hoje, já registrou ${C.money(m.paid)} como pago e ainda faltam ${C.money(m.due)} em compromissos. ${m.balance>=0?'Depois das contas abertas, ficam livres '+C.money(m.balance)+'.':'Para cobrir as contas abertas, faltam '+C.money(Math.abs(m.balance))+'.'}`;
+  if($('#analysisMonth'))$('#analysisMonth').textContent=fmtMonth(currentMonth);const m=monthSimpleSummary(),p=C.monthProjection(state,currentMonth);
+  if(m.mode==='current')$('#analysisText').textContent=m.available===null?`Você já pagou ${C.money(m.paid)} e ainda falta pagar ${C.money(m.due)}. Defina seu saldo de hoje para saber quanto fica livre depois das contas e dos cofres.`:`Você tem ${C.money(m.available)} disponíveis hoje, ${C.money(m.reserved)} reservados em cofres e ${C.money(m.due)} ainda a pagar. ${m.balance>=0?'Livre de verdade: '+C.money(m.balance)+'.':'Para cobrir tudo, faltam '+C.money(Math.abs(m.balance))+'.'}`;
   else if(m.mode==='future')$('#analysisText').textContent=`Para ${fmtMonth(currentMonth)}, há ${C.money(m.due)} previstos para pagar. O Finance OS não projeta seu saldo atual para meses futuros.`;
-  else $('#analysisText').textContent=`Em ${fmtMonth(currentMonth)}, ficaram registrados ${C.money(m.paid)} como pagos e ${C.money(m.received)} em entradas.`;
+  else $('#analysisText').textContent=`Em ${fmtMonth(currentMonth)}, ficaram registrados ${C.money(m.paid)} como pagos e ${C.money(m.received)} em entradas.${m.closed?' Este mês está fechado e o resumo está congelado.':''}`;
   const tx=p.transactions.filter(x=>x.type==='income'),rec=p.planned.filter(x=>x.type==='income'),map=new Map();
   for(const x of [...tx,...rec]){const k=x.incomeSource||'outros';map.set(k,(map.get(k)||0)+(Number(x.amountCents)||0))}
   $('#incomeSources').innerHTML=map.size?[...map.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="history-row"><b>${esc(sourceName(k))}</b><strong class="amount income">${C.money(v)}</strong></div>`).join(''):`<div class="empty-state"><b>Nenhuma entrada cadastrada</b><small>Quando você registrar o que recebeu, aparece aqui.</small></div>`;
+  renderProjection();renderVaultSummary();renderMonthCloseStatus();
 }
 
 function renderActive(){
@@ -509,7 +610,7 @@ function renderActive(){
   if(id==='view-home')renderHome();
   else if(id==='view-movements')renderMovements();
   else if(id==='view-analysis')renderAnalysis();
-  else if(id==='view-settings')syncAppMeta();
+  else if(id==='view-settings'){syncAppMeta();renderBackupStatus();}
 }
 function navigate(v){
   if(v==='home')currentMonth=C.ym(C.ymd());
@@ -518,14 +619,86 @@ function navigate(v){
   renderActive();
 }
 
+function updateBalanceComparison(){
+  const el=$('#balanceComparison');if(!el)return;
+  const tracked=getAvailableBalance(),typed=C.toCents($('#balanceAmount')?.value||'');
+  if(tracked===null){el.textContent=typed>0?`Primeira referência: ${C.money(typed)}.`:'Informe o saldo real para iniciar o acompanhamento.';el.className='reconcile-preview';return}
+  const diff=typed-tracked;
+  if(!$('#balanceAmount')?.value){el.textContent=`Finance OS calcula ${C.money(tracked)} neste momento.`;el.className='reconcile-preview';return}
+  el.textContent=diff===0?'Bate certinho com o saldo calculado.':`${diff>0?'Há':'Faltam'} ${C.money(Math.abs(diff))} ${diff>0?'a mais':'em relação ao cálculo'} do app.`;
+  el.className='reconcile-preview '+(diff===0?'ok':Math.abs(diff)<=500?'':'warn');
+}
+
+
+function renderVaultDialog(){
+  const el=$('#vaultList');if(!el)return;
+  const items=vaultItems();
+  el.innerHTML=items.length?items.map(v=>{const saved=Math.max(0,Number(v.savedCents)||0),target=Math.max(0,Number(v.targetCents)||0),pct=target?Math.min(100,Math.round(saved/target*100)):100;return `<div class="vault-manage-row"><div><b>🔒 ${esc(v.name)}</b><small>${target?`${C.money(saved)} de ${C.money(target)}`:`${C.money(saved)} reservado`}</small><span class="vault-progress"><i style="width:${pct}%"></i></span></div><div class="vault-manage-actions"><button type="button" class="mini" data-vault-edit="${esc(v.id)}">Editar</button><button type="button" class="mini danger" data-vault-del="${esc(v.id)}">Excluir</button></div></div>`}).join(''):'<div class="empty-state"><b>Nenhum cofre criado</b><small>Crie uma meta para separar dinheiro sem mexer no saldo bancário.</small></div>';
+  $$('[data-vault-edit]').forEach(b=>b.onclick=()=>editVault(b.dataset.vaultEdit));
+  $$('[data-vault-del]').forEach(b=>b.onclick=()=>deleteVault(b.dataset.vaultDel));
+}
+
+function openVaults(){
+  $('#vaultForm').reset();$('#vaultEditId').value='';renderVaultDialog();open('vaultDialog');setTimeout(()=>$('#vaultName').focus(),80);
+}
+
+function editVault(id){
+  const v=vaultItems().find(x=>x.id===id);if(!v)return;
+  $('#vaultEditId').value=v.id;$('#vaultName').value=v.name;$('#vaultTarget').value=v.targetCents?(Number(v.targetCents)/100).toFixed(2).replace('.',','):'';$('#vaultSaved').value=(Number(v.savedCents||0)/100).toFixed(2).replace('.',',');setTimeout(()=>$('#vaultName').focus(),50);
+}
+
+async function saveVault(e){
+  e.preventDefault();const name=$('#vaultName').value.trim(),saved=C.toCents($('#vaultSaved').value),target=C.toCents($('#vaultTarget').value),id=$('#vaultEditId').value||C.uid('vault');
+  if(!name||saved<0||target<0)return alert('Confira nome e valores do cofre.');
+  const rec=vaultRecord(),items=[...(rec.items||[])],i=items.findIndex(x=>x.id===id),obj={...(i>=0?items[i]:{}),id,name,savedCents:saved,targetCents:target,createdAt:i>=0?items[i].createdAt:nowIso(),updatedAt:nowIso()};
+  if(i>=0)items[i]=obj;else items.push(obj);
+  await putOne('meta',{key:META_VAULTS,items,updatedAt:nowIso()});$('#vaultForm').reset();$('#vaultEditId').value='';await refresh();renderVaultDialog();renderVaultSummary();showToast(i>=0?'Cofre atualizado.':'Cofre criado.');
+}
+
+async function deleteVault(id){
+  const v=vaultItems().find(x=>x.id===id);if(!v||!confirm(`Excluir o cofre "${v.name}"? Isso não apaga dinheiro; só deixa de reservá-lo no Finance OS.`))return;
+  const rec=vaultRecord(),items=(rec.items||[]).filter(x=>x.id!==id);await putOne('meta',{key:META_VAULTS,items,updatedAt:nowIso()});await refresh();renderVaultDialog();renderVaultSummary();showToast('Cofre removido.');
+}
+
+function syncSimulatorFields(){
+  const credit=$('#simType').value==='credit';$('#simCreditFields').classList.toggle('hidden',!credit);
+  if(credit){
+    const cards=activeCards();$('#simCard').innerHTML=cards.length?cards.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join(''):'<option value="">Nenhum cartão</option>';
+  }
+}
+
+function openSimulator(){
+  $('#simulatorForm').reset();$('#simInstallments').value=1;$('#simType').value='cash';$('#simResult').innerHTML='';syncSimulatorFields();open('simulatorDialog');setTimeout(()=>$('#simAmount').focus(),80);
+}
+
+function runSimulator(e){
+  e.preventDefault();const type=$('#simType').value,amount=C.toCents($('#simAmount').value);if(amount<=0)return alert('Informe um valor válido.');
+  const m=monthSimpleSummary(C.ym(C.ymd())),free=m.available===null?null:m.available-m.due-reservedTotal(),result=$('#simResult');
+  if(type==='cash'||type==='income'){
+    const delta=type==='income'?amount:-amount,next=free===null?null:free+delta;
+    result.innerHTML=`<b>${type==='income'?'Entrada simulada':'Gasto simulado'}: ${type==='income'?'+':'−'}${C.money(amount)}</b><p>${next===null?'Defina seu saldo hoje para ver o valor livre final.':`Livre depois das contas e cofres: <strong class="${next<0?'negative-text':''}">${C.money(next)}</strong>.`}</p>`;
+    return;
+  }
+  const card=state.cards.find(x=>x.id===$('#simCard').value&&!x.archivedAt&&!x.deletedAt),count=Math.max(1,Math.min(120,Number($('#simInstallments').value)||1));if(!card)return alert('Escolha um cartão.');
+  const base=Math.floor(amount/count),last=amount-base*(count-1),cycle=C.ym(C.cardCycleDate(C.ymd(),card)),due=C.cardDueDateForCycle(cycle,card),outstanding=C.cardOutstandingCents(state,card),availableLimit=Math.max(0,(Number(card.limitCents)||0)-outstanding),afterLimit=availableLimit-amount;
+  result.innerHTML=`<b>${esc(card.name)} • ${count}x</b><p>Parcela aproximada: <strong>${C.money(base)}</strong>${last!==base?` (última ${C.money(last)})`:''}. Primeira fatura prevista: <strong>${new Date(due+'T12:00:00').toLocaleDateString('pt-BR')}</strong>.</p><p>Limite livre iria de ${C.money(availableLimit)} para <strong class="${afterLimit<0?'negative-text':''}">${C.money(afterLimit)}</strong>${afterLimit<0?` • excede em ${C.money(Math.abs(afterLimit))}`:''}.</p>`;
+}
+
 function openBalanceDialog(){
   if(currentMonth!==C.ym(C.ymd()))return;
-  const cur=getAvailableBalance();$('#balanceAmount').value=cur===null?'':(cur/100).toFixed(2).replace('.',',');open('balanceDialog');setTimeout(()=>$('#balanceAmount').focus(),80);
+  const cur=getAvailableBalance(),info=$('#balanceCurrentInfo');
+  if(info)info.innerHTML=cur===null?'<b>Ainda sem referência</b><small>Defina o saldo real uma vez; depois entradas e saídas atualizam automaticamente.</small>':`<b>Calculado agora: ${C.money(cur)}</b><small>Se o banco mostrar outro valor, informe abaixo para reconciliar.</small>`;
+  $('#balanceAmount').value=cur===null?'':(cur/100).toFixed(2).replace('.',',');updateBalanceComparison();open('balanceDialog');setTimeout(()=>$('#balanceAmount').focus(),80);
 }
 async function saveBalance(e){
-  e.preventDefault();const cents=C.toCents($('#balanceAmount').value);if(cents<0)return alert('Informe um valor válido.');
-  await putOne('meta',{key:META_LIVE_BALANCE,amountCents:cents,epoch:nowIso(),updatedAt:nowIso()});
-  close('balanceDialog');await refresh();showToast('Saldo de hoje atualizado.');
+  e.preventDefault();
+  const cents=C.toCents($('#balanceAmount').value);if(cents<0)return alert('Informe um valor válido.');
+  const prior=liveBalanceRecord(),expected=prior?Number(prior.amountCents):null,diff=expected===null?0:cents-expected,at=nowIso();
+  const live={key:META_LIVE_BALANCE,amountCents:cents,epoch:at,updatedAt:at,reconciledAt:at};
+  const log=balanceLogRecord(),entries=[...(log.entries||[]),{at,expectedCents:expected,actualCents:cents,differenceCents:diff}].slice(-60);
+  await atomicOps([{store:'meta',value:live},{store:'meta',value:{key:META_BALANCE_LOG,entries,updatedAt:at}}]);
+  close('balanceDialog');await refresh();
+  showToast(expected===null?'Saldo de hoje definido.':diff===0?'Saldo reconciliado • tudo bateu.':`Saldo reconciliado • ajuste ${diff>0?'+':''}${C.money(diff)}.`);
 }
 
 function resetTxForm(type){
@@ -544,6 +717,8 @@ async function saveTx(e){
   e.preventDefault();
   const type=$('#txType').value,amount=C.toCents($('#txAmount').value),desc=$('#txDescription').value.trim(),date=$('#txDate').value,payment=$('#txPayment').value,cardId=$('#txCard').value;
   if(amount<=0||!desc||!date)return alert('Confira valor, descrição e data.');
+  const existingId=$('#txEditId').value,existingTx=existingId?state.transactions.find(x=>x.id===existingId&&!x.deletedAt):null;
+  if(existingTx&&!assertMonthOpen(C.ym(existingTx.date),'editar lançamentos'))return;if(!assertMonthOpen(C.ym(date),'salvar lançamentos'))return;
   if(type==='expense'&&payment==='Crédito'&&!cardId)return alert('Escolha qual cartão foi usado.');
 
   if(type==='expense'&&$('#txInstallmentCheck').checked){
@@ -567,13 +742,13 @@ async function saveTx(e){
 }
 
 function editTx(id){
-  const x=state.transactions.find(t=>t.id===id&&!t.deletedAt);if(!x)return;
+  const x=state.transactions.find(t=>t.id===id&&!t.deletedAt);if(!x)return;if(!assertMonthOpen(C.ym(x.date),'editar lançamentos'))return;
   if(x.creditPurchaseSummary&&x.purchaseId)return editInstallment(x.purchaseId);
   $('#txEditId').value=x.id;$('#txType').value=x.type;$('#txTitle').textContent=x.type==='income'?'Editar entrada':'Editar gasto';$('#txAmount').value=(x.amountCents/100).toFixed(2).replace('.',',');$('#txDescription').value=x.description;$('#txIncomeSource').value=x.incomeSource||'outros';$('#incomeSourceWrap').classList.toggle('hidden',x.type!=='income');$('#txDate').value=x.date;$('#txPayment').value=x.paymentMethod||'Pix';refreshCardSelects();$('#txCard').value=x.cardId||'';syncPaymentUI($('#txPayment').value);if(x.cardId)$('#txCardWrap').classList.remove('hidden');open('txDialog');
 }
 
 async function deleteTx(id){
-  const x=state.transactions.find(t=>t.id===id&&!t.deletedAt);if(!x)return;
+  const x=state.transactions.find(t=>t.id===id&&!t.deletedAt);if(!x)return;if(!assertMonthOpen(C.ym(x.date),'excluir lançamentos'))return;
   if(x.creditPurchaseSummary&&x.purchaseId){
     if(!confirm(`Excluir a compra parcelada ${x.description} e as parcelas futuras?`))return;
     const inst=state.installments.find(i=>i.id===x.purchaseId&&!i.deletedAt),ops=[{store:'transactions',value:{...x,deletedAt:nowIso(),updatedAt:nowIso()}}];
@@ -588,7 +763,7 @@ async function deleteTx(id){
 
 function movementRows(){const p=C.monthProjection(state,currentMonth);return [...p.transactions.map(x=>({...x,planned:false})),...p.planned.map(x=>({...x,planned:true}))].sort((a,b)=>b.date.localeCompare(a.date))}
 async function payPlanned(id){
-  const x=movementRows().find(t=>t.id===id&&t.planned);if(!x)return;
+  const x=movementRows().find(t=>t.id===id&&t.planned);if(!x)return;if(!assertMonthOpen(C.ym(x.date),'marcar pagamentos'))return;
   let amount=x.amountCents;if(x.variable){const v=prompt(`Valor real de ${x.description}:`,amount?(amount/100).toFixed(2).replace('.',','):'0,00');if(v===null)return;amount=C.toCents(v);if(amount<=0)return alert('Informe um valor válido.')}
   const balance=liveBalanceRecord(),tx={id:C.uid('tx'),type:x.type,amountCents:amount,description:x.description,categoryId:x.categoryId||'outros',subcategory:x.subcategory||'',date:x.date,paymentMethod:'Outro',status:'paid',recurringId:x.recurringId||'',purchaseId:x.purchaseId||'',installmentNumber:x.installmentNumber||x.number||0,cardId:x.cardId||'',createdAt:nowIso(),balanceAppliedEpoch:''};
   const effect=cashEffect(tx),delta=balance?effect:0;if(balance&&effect)tx.balanceAppliedEpoch=balance.epoch;
@@ -596,7 +771,7 @@ async function payPlanned(id){
 }
 
 async function undoPaidTransaction(id){
-  const tx=state.transactions.find(x=>x.id===id&&!x.deletedAt);if(!tx)return;
+  const tx=state.transactions.find(x=>x.id===id&&!x.deletedAt);if(!tx)return;if(!assertMonthOpen(C.ym(tx.date),'desmarcar pagamentos'))return;
   if(!(tx.recurringId||tx.purchaseId))return alert('Este lançamento não veio de uma conta planejada. Edite ou exclua pelo Histórico.');
   if(!confirm(`Desmarcar o pagamento de ${tx.description}?`))return;
   const balance=liveBalanceRecord(),delta=balance&&txAppliedEpoch(tx)===balance.epoch?-cashEffect(tx):0;
@@ -607,14 +782,14 @@ async function undoPaidTransaction(id){
 async function payInvoice(cardId,cycle){
   const card=state.cards.find(x=>x.id===cardId&&!x.deletedAt);if(!card)return;
   if(C.invoiceIsPaid(card,cycle))return;
-  const st=C.cardStatement(state,card,cycle),amount=Number(st.totalCents)||0,balance=liveBalanceRecord();
+  const st=C.cardStatement(state,card,cycle);if(!assertMonthOpen(C.ym(st.dueDate),'pagar faturas'))return;const amount=Number(st.totalCents)||0,balance=liveBalanceRecord();
   const paid={...(card.invoicePaid||{}),[cycle]:true},payments={...(card.invoicePayments||{}),[cycle]:{amountCents:amount,paidAt:nowIso(),dueDate:st.dueDate,balanceEpoch:balance?.epoch||''}};
   const updated={...card,invoicePaid:paid,invoicePayments:payments,updatedAt:nowIso()};
   await atomicPutWithBalance('cards',updated,balance?-amount:0,balance?.epoch||'');await refresh();showToast(`Fatura ${card.name} marcada como paga.`);
 }
 async function unpayInvoice(cardId,cycle){
   const card=state.cards.find(x=>x.id===cardId&&!x.deletedAt);if(!card)return;
-  const payment=invoicePayment(card,cycle),st=C.cardStatement(state,card,cycle),amount=Number(payment?.amountCents)||Number(st.totalCents)||0;
+  const payment=invoicePayment(card,cycle),st=C.cardStatement(state,card,cycle);if(!assertMonthOpen(C.ym(st.dueDate),'desmarcar faturas'))return;const amount=Number(payment?.amountCents)||Number(st.totalCents)||0;
   if(!C.invoiceIsPaid(card,cycle))return;
   if(!confirm(`Desmarcar o pagamento da fatura ${card.name}?`))return;
   const paid={...(card.invoicePaid||{})},payments={...(card.invoicePayments||{})};delete paid[cycle];delete payments[cycle];
@@ -628,7 +803,7 @@ function cycleForDueDate(card,dueDate){
 }
 async function saveClosedInvoice(e){
   e.preventDefault();const card=state.cards.find(x=>x.id===$('#invoiceCard').value&&!x.archivedAt&&!x.deletedAt);if(!card)return alert('Escolha um cartão.');
-  const amount=C.toCents($('#invoiceAmount').value),due=$('#invoiceDueDate').value;if(amount<0||!due)return alert('Confira valor e vencimento.');
+  const amount=C.toCents($('#invoiceAmount').value),due=$('#invoiceDueDate').value;if(amount<0||!due)return alert('Confira valor e vencimento.');if(!assertMonthOpen(C.ym(due),'alterar faturas'))return;
   const cycle=cycleForDueDate(card,due);if(C.invoiceIsPaid(card,cycle))return alert('Essa fatura já está paga. Desmarque o pagamento antes de alterar o valor.');
   await putOne('cards',{...card,invoiceOverrides:{...(card.invoiceOverrides||{}),[cycle]:amount},invoiceClosed:{...(card.invoiceClosed||{}),[cycle]:{manual:true,closedAt:nowIso()}},updatedAt:nowIso()});
   close('invoiceDialog');e.target.reset();await refresh();showToast(`Fatura ${card.name} salva no vencimento correto.`);
@@ -636,7 +811,7 @@ async function saveClosedInvoice(e){
 async function adjustInvoice(id,forcedCycle=''){
   const card=state.cards.find(x=>x.id===id&&!x.deletedAt);if(!card)return;
   const cycle=forcedCycle||invoiceCycleForDueMonth(card,currentMonth);if(C.invoiceIsPaid(card,cycle))return alert('Essa fatura já está paga. Desmarque o pagamento antes de ajustar o valor.');
-  const st=C.cardStatement(state,card,cycle),label=fmtMonth(C.ym(st.dueDate));
+  const st=C.cardStatement(state,card,cycle);if(!assertMonthOpen(C.ym(st.dueDate),'ajustar faturas'))return;const label=fmtMonth(C.ym(st.dueDate));
   const v=prompt(`Valor real da fatura ${card.name} que vence em ${label} (${new Date(st.dueDate+'T12:00:00').toLocaleDateString('pt-BR')}).\n\nCalculado pelas compras: ${C.money(st.calculatedCents)}\n\nDigite o valor real ou deixe vazio para voltar ao automático:`,st.overridden?(st.totalCents/100).toFixed(2).replace('.',','):'');
   if(v===null)return;
   const overrides={...(card.invoiceOverrides||{})};
@@ -687,7 +862,7 @@ function showCards(){
 }
 
 async function editRecurringOccurrence(id,k){
-  const r=state.recurring.find(x=>x.id===id&&!x.deletedAt);if(!r)return;const occ=C.recurringOccurrence(r,k);if(!occ)return;
+  if(!assertMonthOpen(k,'editar este mês'))return;const r=state.recurring.find(x=>x.id===id&&!x.deletedAt);if(!r)return;const occ=C.recurringOccurrence(r,k);if(!occ)return;
   const val=prompt(`Valor de ${r.description} neste mês:`,occ.amountCents?(occ.amountCents/100).toFixed(2).replace('.',','):'0,00');if(val===null)return;
   const amount=C.toCents(val),date=prompt('Data deste mês (AAAA-MM-DD):',occ.date);if(date===null)return;if(!/^\d{4}-\d{2}-\d{2}$/.test(date))return alert('Data inválida. Use AAAA-MM-DD.');
   await putOne('recurring',{...r,monthOverrides:{...(r.monthOverrides||{}),[k]:{amountCents:amount,date}},updatedAt:nowIso()});await refresh();showToast('Este mês foi atualizado.');
@@ -776,20 +951,30 @@ async function deleteManaged(store,id){
   await refresh();close('listDialog');store==='recurring'?(x.type==='investment'?showInvestments():showList('recurring')):showList('installments');showToast('Item arquivado.');
 }
 
+
+function renderBackupStatus(){
+  const el=$('#backupStatus');if(!el)return;const rec=backupStatusRecord(),last=rec.lastExportAt;
+  if(!last){el.className='backup-status warn';el.textContent='Nenhum backup registrado neste aparelho.';return}
+  const days=Math.max(0,Math.floor((Date.now()-new Date(last).getTime())/86400000)),label=new Date(last).toLocaleString('pt-BR');
+  el.className='backup-status '+(days>30?'danger':days>14?'warn':'ok');
+  el.textContent=days===0?`Último backup: hoje • ${label}`:`Último backup: há ${days} dia${days===1?'':'s'} • ${label}`;
+}
+
 async function exportBackup(){
-  const env=await C.createBackupEnvelope(state);const blob=new Blob([JSON.stringify(env,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`finance-os-backup-${C.ymd()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);$('#backupStatus').textContent='Backup completo exportado agora.';
+  const env=await C.createBackupEnvelope(state),blob=new Blob([JSON.stringify(env,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`finance-os-backup-${C.ymd()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  const prior=backupStatusRecord();await putOne('meta',{...prior,key:META_BACKUP_STATUS,lastExportAt:nowIso(),updatedAt:nowIso()});await loadState();renderBackupStatus();
 }
 async function importBackup(file){
   try{
     const parsed=JSON.parse(await file.text()),v=await C.validateBackupEnvelope(parsed);if(!v.ok)throw new Error(v.errors.join('\n'));
     if(!confirm('Restaurar este backup vai substituir os dados atuais deste aparelho. A operação é atômica: ou restaura tudo, ou não altera nada. Continuar?'))return;
     await atomicRestore(v.data);await loadState();
-    // Backups antigos não carregavam saldo vivo. Não reaproveite silenciosamente o saldo do aparelho anterior ao restore.
     if(!(v.data.meta||[]).some(x=>x.key===META_LIVE_BALANCE)){
       await putOne('meta',{key:META_MIGRATION,version:'1.8.0',completedAt:nowIso(),restoredWithoutBalance:true});
       await loadState();await migrateCardsV180();
     }else await migrateV180();
-    await refresh();$('#backupStatus').textContent='Backup restaurado com sucesso.';showToast('Backup restaurado por completo.');
+    const prior=backupStatusRecord();await putOne('meta',{...prior,key:META_BACKUP_STATUS,lastRestoreAt:nowIso(),updatedAt:nowIso()});
+    await refresh();renderBackupStatus();showToast('Backup restaurado por completo.');
   }catch(e){console.error(e);alert('Não foi possível restaurar o backup. Nenhuma restauração parcial foi mantida.\n\n'+e.message)}
 }
 
@@ -819,6 +1004,11 @@ function runIntegrityAudit(){
       }
     }
   }
+  const vaults=vaultItems(),vaultIds=new Set();
+  for(const v of vaults){if(!v.id||vaultIds.has(v.id))issues.push('Cofres: ID ausente ou duplicado');vaultIds.add(v.id);if(!v.name||Number(v.savedCents)<0||Number(v.targetCents)<0)issues.push(`Cofre "${v.name||'sem nome'}": valores inválidos`)}
+  for(const m of state.meta.filter(x=>String(x.key||'').startsWith(META_MONTH_CLOSE_PREFIX))){
+    if(!/^\d{4}-\d{2}$/.test(m.month||'')||!m.summary||!Array.isArray(m.rows))issues.push(`Fechamento ${m.month||m.key}: snapshot inválido`);
+  }
   const bal=liveBalanceRecord();if(bal&&!Number.isFinite(Number(bal.amountCents)))issues.push('Saldo disponível inválido');
   const el=$('#auditStatus');el.classList.remove('ok','warn');
   if(issues.length){el.classList.add('warn');el.textContent=`${issues.length} ponto${issues.length===1?'':'s'} para revisar: ${issues.slice(0,3).join(' • ')}${issues.length>3?' • …':''}`}
@@ -830,7 +1020,7 @@ function bind(){
   fillSelect($('#txIncomeSource'),incomeSources);bindMoneyInputs();syncAppMeta();
   $$('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view));$$('[data-close]').forEach(b=>b.onclick=()=>close(b.dataset.close));
   $('#settingsBtn').onclick=()=>navigate('settings');$('#fab').onclick=()=>open('addDialog');
-  $('#balanceHero').onclick=openBalanceDialog;$('#availableMetricBtn').onclick=openBalanceDialog;$('#balanceForm').onsubmit=saveBalance;
+  $('#balanceHero').onclick=openBalanceDialog;$('#availableMetricBtn').onclick=openBalanceDialog;$('#balanceForm').onsubmit=saveBalance;$('#balanceAmount').addEventListener('input',updateBalanceComparison);if($('#reservedMetricBtn'))$('#reservedMetricBtn').onclick=openVaults;
   $('#newExpense').onclick=()=>{close('addDialog');resetTxForm('expense');open('txDialog');setTimeout(()=>$('#txAmount').focus(),80)};
   $('#newIncome').onclick=()=>{close('addDialog');resetTxForm('income');open('txDialog');setTimeout(()=>$('#txAmount').focus(),80)};
   $('#txForm').onsubmit=saveTx;$$('[data-payment]').forEach(b=>b.onclick=()=>syncPaymentUI(b.dataset.payment));
@@ -844,13 +1034,15 @@ function bind(){
   $('#newCardInvoice').onclick=()=>{close('addDialog');fillInvoiceCards();$('#invoiceDueDate').value=C.ymd();open('invoiceDialog')};$('#invoiceForm').onsubmit=saveClosedInvoice;
   $('#homeAddCard').onclick=openNewCard;$('#newCardBtn').onclick=openNewCard;$('#cardForm').onsubmit=saveCard;
 
-  $('#homePrevMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',-1));renderHome()};$('#homeNextMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',1));renderHome()};$('#homeCurrentMonth').onclick=()=>{currentMonth=C.ym(C.ymd());renderHome()};
+  $('#homePrevMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',-1));renderHome()};$('#homeNextMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',1));renderHome()};$('#homeCurrentMonth').onclick=()=>{currentMonth=C.ym(C.ymd());renderHome()};if($('#analysisPrevMonth'))$('#analysisPrevMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',-1));renderAnalysis()};if($('#analysisNextMonth'))$('#analysisNextMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',1));renderAnalysis()};
   $('#prevMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',-1));renderMovements()};$('#nextMonth').onclick=()=>{currentMonth=C.ym(C.addMonths(currentMonth+'-01',1));renderMovements()};
   $('#movementSearch').oninput=e=>{movementSearch=e.target.value;renderMovements()};$$('[data-movement-filter]').forEach(b=>b.onclick=()=>{movementFilter=b.dataset.movementFilter;movementCard='all';$$('[data-movement-filter]').forEach(x=>x.classList.toggle('active',x===b));renderMovements()});$('#movementCardFilter').onchange=e=>{movementCard=e.target.value;renderMovements()};
 
-  $('#manageRecurringBtn').onclick=()=>showList('recurring');$('#manageInstallmentsBtn').onclick=()=>showList('installments');$('#manageInvestmentsBtn').onclick=showInvestments;$('#manageCardsBtn').onclick=showCards;
+  $('#manageRecurringBtn').onclick=()=>showList('recurring');$('#manageInstallmentsBtn').onclick=()=>showList('installments');$('#manageInvestmentsBtn').onclick=showInvestments;if($('#manageVaultsBtn'))$('#manageVaultsBtn').onclick=openVaults;$('#manageCardsBtn').onclick=showCards;
   $('#setPinBtn').onclick=setPin;$('#removePinBtn').onclick=removePin;$('#lockNowBtn').onclick=lockApp;$('#unlockBtn').onclick=unlockApp;$('#unlockPin').onkeydown=e=>{if(e.key==='Enter')unlockApp()};
   $('#exportBtn').onclick=exportBackup;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=e=>e.target.files[0]&&importBackup(e.target.files[0]);$('#runAuditBtn').onclick=runIntegrityAudit;
+  if($('#openVaultsBtn'))$('#openVaultsBtn').onclick=openVaults;if($('#vaultForm'))$('#vaultForm').onsubmit=saveVault;
+  if($('#openSimulatorBtn'))$('#openSimulatorBtn').onclick=openSimulator;if($('#simType'))$('#simType').onchange=syncSimulatorFields;if($('#simulatorForm'))$('#simulatorForm').onsubmit=runSimulator;
 }
 
 (async()=>{
@@ -858,7 +1050,7 @@ function bind(){
   await loadState();
   await migrateV180();
   await loadState();
-  bind();updatePinStatus();refreshCardSelects();renderHome();
+  bind();updatePinStatus();refreshCardSelects();renderHome();renderBackupStatus();
   document.body.dataset.appReady='1';if(pinConfig())lockApp();
-  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.8.1',{updateViaCache:'none'}).catch(console.warn);
+  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.0',{updateViaCache:'none'}).catch(console.warn);
 })().catch(e=>{console.error('BOOT_FATAL',e);document.body.dataset.appReady='0';alert('O Finance OS não conseguiu iniciar. Seus dados locais permanecem no aparelho. Atualize para a correção mais recente.')});
