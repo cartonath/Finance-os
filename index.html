@@ -7,10 +7,10 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
-  <link rel="manifest" href="manifest.webmanifest?v=1.9.0">
-  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png?v=1.9.0">
-  <link rel="apple-touch-icon" href="./icon-192.png?v=1.9.0">
-  <link rel="stylesheet" href="styles.css?v=1.9.0">
+  <link rel="manifest" href="manifest.webmanifest?v=1.9.1">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png?v=1.9.1">
+  <link rel="apple-touch-icon" href="./icon-192.png?v=1.9.1">
+  <link rel="stylesheet" href="styles.css?v=1.9.1">
   <title>Finance OS</title>
 </head>
 <body>
@@ -104,21 +104,23 @@
         <article><span>60 dias</span><strong id="projection60">—</strong></article>
         <article><span>90 dias</span><strong id="projection90">—</strong></article>
       </div>
-      <div id="projectionList" class="timeline-card"></div>
+
+      <div class="section-head"><div><span class="section-eyebrow">METAS</span><h2>Cofres</h2></div><button id="openVaultsBtn" class="link">gerenciar</button></div>
+      <div id="vaultSummaryList" class="vault-summary"></div>
 
       <div class="section-head"><div><span class="section-eyebrow">DECISÃO</span><h2>Antes de gastar</h2></div></div>
       <button id="openSimulatorBtn" class="analysis-action">
         <span><b>Simular “e se?”</b><small>Compra, parcela ou entrada sem salvar nada</small></span><strong>›</strong>
       </button>
 
-      <div class="section-head"><div><span class="section-eyebrow">METAS</span><h2>Cofres</h2></div><button id="openVaultsBtn" class="link">gerenciar</button></div>
-      <div id="vaultSummaryList" class="vault-summary"></div>
-
       <div class="section-head"><div><span class="section-eyebrow">FECHAMENTO</span><h2>Congelar o mês</h2></div></div>
       <div class="analysis-card month-close-card">
         <p id="monthCloseStatus">—</p>
         <button id="monthCloseBtn" class="secondary wide">Fechar mês</button>
       </div>
+
+      <div class="section-head"><div><span class="section-eyebrow">AGENDA</span><h2>Próximos vencimentos</h2></div></div>
+      <div id="projectionList" class="timeline-card"></div>
 
       <div class="section-head"><div><span class="section-eyebrow">ENTRADAS</span><h2>De onde entrou dinheiro</h2></div></div>
       <div id="incomeSources" class="card-stack"></div>
@@ -279,7 +281,7 @@
   </form>
 </dialog>
 
-<script src="core.js?v=1.9.0"></script>
-<script src="app.js?v=1.9.0"></script>
+<script src="core.js?v=1.9.1"></script>
+<script src="app.js?v=1.9.1"></script>
 </body>
 </html>

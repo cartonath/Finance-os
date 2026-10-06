@@ -1,5 +1,5 @@
-FINANCE OS v1.9.0 — PLANNING WORKSPACE + COFRES + FECHAMENTO
-Build: 2026-10-06.01
+FINANCE OS v1.9.1 — COMPACT HOME + ANALYSIS HIERARCHY
+Build: 2026-10-06.02
 
 SUBSTITUA OS 9 ARQUIVOS DA RAIZ DO REPOSITÓRIO:
 - README_UPLOAD.txt
@@ -15,7 +15,15 @@ SUBSTITUA OS 9 ARQUIVOS DA RAIZ DO REPOSITÓRIO:
 GitHub Pages:
 O repositório já usa o workflow customizado de GitHub Actions. Depois do commit na main, o deploy deve rodar automaticamente.
 
-PRINCIPAIS NOVIDADES v1.9.0
+BASE v1.9.0 PRESERVADA
+
+AJUSTES v1.9.1
+
+- Home mais compacta: hero, métricas, cartões e linhas de contas ocupam menos altura sem perder informação.
+- Análises reorganizada: Resumo → 30/60/90 → Cofres → “E se?” → Fechamento → Agenda → Entradas.
+- Agenda detalhada saiu do topo do planejamento para não empurrar as ferramentas de decisão para baixo.
+- Nenhuma mudança no motor financeiro da v1.9.0; patch visual/arquitetura de informação.
+
 1. Cofres / metas
    - dinheiro reservado continua dentro do saldo real, mas deixa de ser considerado livre;
    - Home passa a mostrar Saldo hoje / A pagar / Reservado / Pago no mês;

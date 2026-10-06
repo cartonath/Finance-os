@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_META=Object.freeze({version:'1.9.0',build:'2026-10-06.01',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.9.1',build:'2026-10-06.02',channel:'Stable'});
 const C=FinanceCore;
 const DB='finance-os-db';
 const DB_VERSION=5;
@@ -1052,5 +1052,5 @@ function bind(){
   await loadState();
   bind();updatePinStatus();refreshCardSelects();renderHome();renderBackupStatus();
   document.body.dataset.appReady='1';if(pinConfig())lockApp();
-  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.0',{updateViaCache:'none'}).catch(console.warn);
+  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.1',{updateViaCache:'none'}).catch(console.warn);
 })().catch(e=>{console.error('BOOT_FATAL',e);document.body.dataset.appReady='0';alert('O Finance OS não conseguiu iniciar. Seus dados locais permanecem no aparelho. Atualize para a correção mais recente.')});
