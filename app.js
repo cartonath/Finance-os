@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_META=Object.freeze({version:'1.9.1',build:'2026-10-06.02',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.9.2',build:'2026-11-02.01',channel:'Stable'});
 const C=FinanceCore;
 const DB='finance-os-db';
 const DB_VERSION=5;
@@ -14,6 +14,7 @@ const META_VAULTS='vaults-v1';
 const META_BALANCE_LOG='balance-reconciliations-v1';
 const META_BACKUP_STATUS='backup-status-v1';
 const META_MONTH_CLOSE_PREFIX='month-close:';
+const META_BALANCE_CERTAINTY='balance-certainty-v1.9.2';
 
 const incomeSources=[
   ['salario','💼 Salário'],['particular','🧠 Atendimento particular'],['tiktok','🎵 TikTok Shop'],
@@ -80,8 +81,21 @@ async function atomicOps(ops){
 
 function metaByKey(key){return state.meta.find(x=>x.key===key)||null}
 function liveBalanceRecord(){const x=metaByKey(META_LIVE_BALANCE);return x&&Number.isFinite(Number(x.amountCents))?x:null}
-function getAvailableBalance(){return liveBalanceRecord()?.amountCents??null}
-function getAvailableEpoch(){return liveBalanceRecord()?.epoch||''}
+function balanceRecordIsConfirmed(rec=liveBalanceRecord()){
+  if(!rec)return false;
+  const amount=Number(rec.amountCents);
+  // O Finance OS não aceita saldo negativo como referência manual. Se um valor negativo apareceu
+  // automaticamente, a referência ficou desatualizada e precisa ser reconciliada.
+  if(amount<0)return false;
+  if(rec.confirmed===false||rec.status==='unknown')return false;
+  if(rec.confirmed===true||rec.status==='confirmed'||rec.reconciledAt)return true;
+  // Compatibilidade: saldos positivos vindos das versões antigas eram referências manuais do usuário.
+  // Zero sem reconciliação explícita é ambíguo e nunca deve ser tratado como saldo real.
+  return amount>0;
+}
+function confirmedBalanceRecord(){const x=liveBalanceRecord();return balanceRecordIsConfirmed(x)?x:null}
+function getAvailableBalance(){return confirmedBalanceRecord()?.amountCents??null}
+function getAvailableEpoch(){return confirmedBalanceRecord()?.epoch||''}
 function vaultRecord(){const x=metaByKey(META_VAULTS);return x&&Array.isArray(x.items)?x:{key:META_VAULTS,items:[]}}
 function vaultItems(){return vaultRecord().items.filter(x=>x&&!x.archivedAt)}
 function reservedTotal(){return vaultItems().reduce((s,x)=>s+Math.max(0,Number(x.savedCents)||0),0)}
@@ -102,9 +116,16 @@ async function atomicPutWithBalance(store,obj,delta=0,expectedEpoch=''){
   const tx=db.transaction([store,'meta'],'readwrite');
   tx.objectStore(store).put(obj);
   if(delta){
-    const rec=liveBalanceRecord();
+    const rec=confirmedBalanceRecord();
     if(rec&&(!expectedEpoch||rec.epoch===expectedEpoch)){
-      tx.objectStore('meta').put({...rec,amountCents:Number(rec.amountCents)+Number(delta),updatedAt:nowIso()});
+      const next=Number(rec.amountCents)+Number(delta);
+      if(next<0){
+        // Um pagamento maior que o saldo conhecido prova que a referência ficou desatualizada.
+        // Em vez de inventar saldo negativo, tornamos o saldo desconhecido até nova reconciliação.
+        tx.objectStore('meta').put({...rec,confirmed:false,status:'unknown',legacyUnconfirmedCents:next,invalidatedAt:nowIso(),invalidatedReason:'automatic-balance-would-be-negative',updatedAt:nowIso()});
+      }else{
+        tx.objectStore('meta').put({...rec,amountCents:next,updatedAt:nowIso()});
+      }
     }
   }
   await txDone(tx);
@@ -173,7 +194,7 @@ function cashEffect(tx){
 }
 
 function shouldApplyNewTransaction(tx){
-  const balance=liveBalanceRecord(),effect=cashEffect(tx);
+  const balance=confirmedBalanceRecord(),effect=cashEffect(tx);
   if(!balance||!effect)return false;
   const epochDay=String(balance.epoch||'').slice(0,10);
   const created=tx.createdAt||nowIso();
@@ -198,7 +219,22 @@ async function migrateLegacyBalance(){
     if(chosen){amount=chosen.value;epoch=localStorage.getItem(`finance-os-available-epoch-${chosen.month}`)||epoch}
   }
   if(amount===null)return false;
-  await putOne('meta',{key:META_LIVE_BALANCE,amountCents:amount,epoch:epoch||nowIso(),updatedAt:nowIso(),migratedFrom:'localStorage'});
+  await putOne('meta',{key:META_LIVE_BALANCE,amountCents:amount,epoch:epoch||nowIso(),updatedAt:nowIso(),migratedFrom:'localStorage',confirmed:amount>0,status:amount>0?'confirmed':'unknown'});
+  return true;
+}
+
+async function migrateBalanceCertaintyV192(){
+  if(metaByKey(META_BALANCE_CERTAINTY))return false;
+  const rec=liveBalanceRecord();
+  if(!rec){await putOne('meta',{key:META_BALANCE_CERTAINTY,completedAt:nowIso(),hadBalance:false});return true}
+  const amount=Number(rec.amountCents),explicit=!!rec.reconciledAt||rec.confirmed===true||rec.status==='confirmed';
+  const confirmed=amount>=0&&(explicit||amount>0);
+  const updated={...rec,confirmed,status:confirmed?'confirmed':'unknown',balanceCertaintyV192:true,updatedAt:nowIso()};
+  if(!confirmed)updated.legacyUnconfirmedCents=Number(rec.amountCents)||0;
+  await atomicOps([
+    {store:'meta',value:updated},
+    {store:'meta',value:{key:META_BALANCE_CERTAINTY,completedAt:nowIso(),hadBalance:true,confirmed}}
+  ]);
   return true;
 }
 
@@ -252,6 +288,8 @@ async function migrateV180(){
   if(await migrateLegacyBalance())changed=true;
   if(changed)await loadState();
   if(await migrateCardsV180())changed=true;
+  if(changed)await loadState();
+  if(await migrateBalanceCertaintyV192())changed=true;
   await putOne('meta',{key:META_MIGRATION,version:'1.8.0',completedAt:nowIso()});
   return changed;
 }
@@ -361,9 +399,9 @@ function renderHome(){
   if(current){
     $('#heroKicker').textContent='AGORA';
     if(m.available===null){
-      $('#balanceLabel').textContent='Saldo disponível hoje';$('#freeMoney').textContent='R$ —';$('#freeMoney').classList.remove('negative');
-      $('#freeHint').textContent='Toque para informar quanto dinheiro você realmente tem hoje. O app não vai adivinhar.';
-      $('#incomeMetric').textContent='Definir';$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para reconciliar';
+      $('#balanceLabel').textContent='Ainda a pagar';$('#freeMoney').textContent=C.money(m.due);$('#freeMoney').classList.remove('negative');
+      $('#freeHint').textContent='Saldo de hoje não informado • este valor mostra somente o que ainda está aberto.';
+      $('#incomeMetric').textContent='Não informado';$('#availableMetricLabel').textContent='💵 Saldo hoje';$('#availableMetricHelp').textContent='toque para informar';
     }else{
       $('#balanceLabel').textContent=m.balance>=0?'Livre de verdade':'Falta para cobrir tudo';
       $('#freeMoney').textContent=C.money(Math.abs(m.balance));$('#freeMoney').classList.toggle('negative',m.balance<0);
@@ -596,7 +634,7 @@ async function reopenMonth(k){
 
 function renderAnalysis(){
   if($('#analysisMonth'))$('#analysisMonth').textContent=fmtMonth(currentMonth);const m=monthSimpleSummary(),p=C.monthProjection(state,currentMonth);
-  if(m.mode==='current')$('#analysisText').textContent=m.available===null?`Você já pagou ${C.money(m.paid)} e ainda falta pagar ${C.money(m.due)}. Defina seu saldo de hoje para saber quanto fica livre depois das contas e dos cofres.`:`Você tem ${C.money(m.available)} disponíveis hoje, ${C.money(m.reserved)} reservados em cofres e ${C.money(m.due)} ainda a pagar. ${m.balance>=0?'Livre de verdade: '+C.money(m.balance)+'.':'Para cobrir tudo, faltam '+C.money(Math.abs(m.balance))+'.'}`;
+  if(m.mode==='current')$('#analysisText').textContent=m.available===null?`Ainda há ${C.money(m.due)} em contas abertas e ${C.money(m.paid)} já foi pago. Seu saldo de hoje ainda não foi informado; sem ele, o Finance OS não inventa se sobra ou falta dinheiro.`:`Você tem ${C.money(m.available)} disponíveis hoje, ${C.money(m.reserved)} reservados em cofres e ${C.money(m.due)} ainda a pagar. ${m.balance>=0?'Livre de verdade: '+C.money(m.balance)+'.':'Para cobrir tudo, faltam '+C.money(Math.abs(m.balance))+'.'}`;
   else if(m.mode==='future')$('#analysisText').textContent=`Para ${fmtMonth(currentMonth)}, há ${C.money(m.due)} previstos para pagar. O Finance OS não projeta seu saldo atual para meses futuros.`;
   else $('#analysisText').textContent=`Em ${fmtMonth(currentMonth)}, ficaram registrados ${C.money(m.paid)} como pagos e ${C.money(m.received)} em entradas.${m.closed?' Este mês está fechado e o resumo está congelado.':''}`;
   const tx=p.transactions.filter(x=>x.type==='income'),rec=p.planned.filter(x=>x.type==='income'),map=new Map();
@@ -621,8 +659,8 @@ function navigate(v){
 
 function updateBalanceComparison(){
   const el=$('#balanceComparison');if(!el)return;
-  const tracked=getAvailableBalance(),typed=C.toCents($('#balanceAmount')?.value||'');
-  if(tracked===null){el.textContent=typed>0?`Primeira referência: ${C.money(typed)}.`:'Informe o saldo real para iniciar o acompanhamento.';el.className='reconcile-preview';return}
+  const raw=String($('#balanceAmount')?.value||'').trim(),tracked=getAvailableBalance(),typed=C.toCents(raw);
+  if(tracked===null){el.textContent=raw?`Primeira referência: ${C.money(typed)}.`:'Informe o saldo real para iniciar o acompanhamento.';el.className='reconcile-preview';return}
   const diff=typed-tracked;
   if(!$('#balanceAmount')?.value){el.textContent=`Finance OS calcula ${C.money(tracked)} neste momento.`;el.className='reconcile-preview';return}
   el.textContent=diff===0?'Bate certinho com o saldo calculado.':`${diff>0?'Há':'Faltam'} ${C.money(Math.abs(diff))} ${diff>0?'a mais':'em relação ao cálculo'} do app.`;
@@ -692,9 +730,10 @@ function openBalanceDialog(){
 }
 async function saveBalance(e){
   e.preventDefault();
-  const cents=C.toCents($('#balanceAmount').value);if(cents<0)return alert('Informe um valor válido.');
-  const prior=liveBalanceRecord(),expected=prior?Number(prior.amountCents):null,diff=expected===null?0:cents-expected,at=nowIso();
-  const live={key:META_LIVE_BALANCE,amountCents:cents,epoch:at,updatedAt:at,reconciledAt:at};
+  const raw=String($('#balanceAmount').value||'').trim();if(!raw)return alert('Informe o saldo real de hoje. R$ 0,00 é válido, mas precisa ser digitado.');
+  const cents=C.toCents(raw);if(cents<0)return alert('Informe um valor válido.');
+  const prior=confirmedBalanceRecord(),expected=prior?Number(prior.amountCents):null,diff=expected===null?0:cents-expected,at=nowIso();
+  const live={key:META_LIVE_BALANCE,amountCents:cents,epoch:at,updatedAt:at,reconciledAt:at,confirmed:true,status:'confirmed',balanceCertaintyV192:true};
   const log=balanceLogRecord(),entries=[...(log.entries||[]),{at,expectedCents:expected,actualCents:cents,differenceCents:diff}].slice(-60);
   await atomicOps([{store:'meta',value:live},{store:'meta',value:{key:META_BALANCE_LOG,entries,updatedAt:at}}]);
   close('balanceDialog');await refresh();
@@ -730,7 +769,7 @@ async function saveTx(e){
     close('txDialog');e.target.reset();await refresh();showToast(`Compra em ${count}x salva no Histórico e na fatura.`);return;
   }
 
-  const editId=$('#txEditId').value,prior=editId?state.transactions.find(x=>x.id===editId):null,balance=liveBalanceRecord();
+  const editId=$('#txEditId').value,prior=editId?state.transactions.find(x=>x.id===editId):null,balance=confirmedBalanceRecord();
   let delta=0;
   if(prior&&balance&&txAppliedEpoch(prior)===balance.epoch)delta-=cashEffect(prior);
   const tx={...(prior||{}),id:editId||C.uid('tx'),type,amountCents:amount,description:desc,categoryId:'outros',subcategory:'',incomeSource:type==='income'?$('#txIncomeSource').value:'',date,paymentMethod:payment,cardId,status:'paid',createdAt:prior?.createdAt||nowIso(),updatedAt:editId?nowIso():'',balanceAppliedEpoch:'',availableAppliedEpoch:''};
@@ -756,7 +795,7 @@ async function deleteTx(id){
     await atomicOps(ops);await refresh();showToast('Compra parcelada excluída.');return;
   }
   if(!confirm(`Excluir ${x.description}?`))return;
-  const balance=liveBalanceRecord(),delta=balance&&txAppliedEpoch(x)===balance.epoch?-cashEffect(x):0;
+  const balance=confirmedBalanceRecord(),delta=balance&&txAppliedEpoch(x)===balance.epoch?-cashEffect(x):0;
   await atomicPutWithBalance('transactions',{...x,deletedAt:nowIso(),balanceAppliedEpoch:'',availableAppliedEpoch:''},delta,balance?.epoch||'');
   await refresh();showToast('Movimentação excluída.');
 }
@@ -765,7 +804,7 @@ function movementRows(){const p=C.monthProjection(state,currentMonth);return [..
 async function payPlanned(id){
   const x=movementRows().find(t=>t.id===id&&t.planned);if(!x)return;if(!assertMonthOpen(C.ym(x.date),'marcar pagamentos'))return;
   let amount=x.amountCents;if(x.variable){const v=prompt(`Valor real de ${x.description}:`,amount?(amount/100).toFixed(2).replace('.',','):'0,00');if(v===null)return;amount=C.toCents(v);if(amount<=0)return alert('Informe um valor válido.')}
-  const balance=liveBalanceRecord(),tx={id:C.uid('tx'),type:x.type,amountCents:amount,description:x.description,categoryId:x.categoryId||'outros',subcategory:x.subcategory||'',date:x.date,paymentMethod:'Outro',status:'paid',recurringId:x.recurringId||'',purchaseId:x.purchaseId||'',installmentNumber:x.installmentNumber||x.number||0,cardId:x.cardId||'',createdAt:nowIso(),balanceAppliedEpoch:''};
+  const balance=confirmedBalanceRecord(),tx={id:C.uid('tx'),type:x.type,amountCents:amount,description:x.description,categoryId:x.categoryId||'outros',subcategory:x.subcategory||'',date:x.date,paymentMethod:'Outro',status:'paid',recurringId:x.recurringId||'',purchaseId:x.purchaseId||'',installmentNumber:x.installmentNumber||x.number||0,cardId:x.cardId||'',createdAt:nowIso(),balanceAppliedEpoch:''};
   const effect=cashEffect(tx),delta=balance?effect:0;if(balance&&effect)tx.balanceAppliedEpoch=balance.epoch;
   await atomicPutWithBalance('transactions',tx,delta,balance?.epoch||'');await refresh();showToast(x.type==='investment'?'Valor marcado como guardado.':'Pagamento confirmado.');
 }
@@ -774,7 +813,7 @@ async function undoPaidTransaction(id){
   const tx=state.transactions.find(x=>x.id===id&&!x.deletedAt);if(!tx)return;if(!assertMonthOpen(C.ym(tx.date),'desmarcar pagamentos'))return;
   if(!(tx.recurringId||tx.purchaseId))return alert('Este lançamento não veio de uma conta planejada. Edite ou exclua pelo Histórico.');
   if(!confirm(`Desmarcar o pagamento de ${tx.description}?`))return;
-  const balance=liveBalanceRecord(),delta=balance&&txAppliedEpoch(tx)===balance.epoch?-cashEffect(tx):0;
+  const balance=confirmedBalanceRecord(),delta=balance&&txAppliedEpoch(tx)===balance.epoch?-cashEffect(tx):0;
   await atomicPutWithBalance('transactions',{...tx,deletedAt:nowIso(),paymentUndoneAt:nowIso(),balanceAppliedEpoch:'',availableAppliedEpoch:''},delta,balance?.epoch||'');
   await refresh();showToast('Pagamento desmarcado.');
 }
@@ -782,7 +821,7 @@ async function undoPaidTransaction(id){
 async function payInvoice(cardId,cycle){
   const card=state.cards.find(x=>x.id===cardId&&!x.deletedAt);if(!card)return;
   if(C.invoiceIsPaid(card,cycle))return;
-  const st=C.cardStatement(state,card,cycle);if(!assertMonthOpen(C.ym(st.dueDate),'pagar faturas'))return;const amount=Number(st.totalCents)||0,balance=liveBalanceRecord();
+  const st=C.cardStatement(state,card,cycle);if(!assertMonthOpen(C.ym(st.dueDate),'pagar faturas'))return;const amount=Number(st.totalCents)||0,balance=confirmedBalanceRecord();
   const paid={...(card.invoicePaid||{}),[cycle]:true},payments={...(card.invoicePayments||{}),[cycle]:{amountCents:amount,paidAt:nowIso(),dueDate:st.dueDate,balanceEpoch:balance?.epoch||''}};
   const updated={...card,invoicePaid:paid,invoicePayments:payments,updatedAt:nowIso()};
   await atomicPutWithBalance('cards',updated,balance?-amount:0,balance?.epoch||'');await refresh();showToast(`Fatura ${card.name} marcada como paga.`);
@@ -793,7 +832,7 @@ async function unpayInvoice(cardId,cycle){
   if(!C.invoiceIsPaid(card,cycle))return;
   if(!confirm(`Desmarcar o pagamento da fatura ${card.name}?`))return;
   const paid={...(card.invoicePaid||{})},payments={...(card.invoicePayments||{})};delete paid[cycle];delete payments[cycle];
-  const balance=liveBalanceRecord(),delta=balance&&payment?.balanceEpoch===balance.epoch?amount:0;
+  const balance=confirmedBalanceRecord(),delta=balance&&payment?.balanceEpoch===balance.epoch?amount:0;
   await atomicPutWithBalance('cards',{...card,invoicePaid:paid,invoicePayments:payments,updatedAt:nowIso()},delta,balance?.epoch||'');await refresh();showToast(`Pagamento da fatura ${card.name} desmarcado.`);
 }
 
@@ -1052,5 +1091,5 @@ function bind(){
   await loadState();
   bind();updatePinStatus();refreshCardSelects();renderHome();renderBackupStatus();
   document.body.dataset.appReady='1';if(pinConfig())lockApp();
-  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.1',{updateViaCache:'none'}).catch(console.warn);
+  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.2',{updateViaCache:'none'}).catch(console.warn);
 })().catch(e=>{console.error('BOOT_FATAL',e);document.body.dataset.appReady='0';alert('O Finance OS não conseguiu iniciar. Seus dados locais permanecem no aparelho. Atualize para a correção mais recente.')});
