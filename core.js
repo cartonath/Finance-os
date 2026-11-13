@@ -34,8 +34,9 @@
     const total=Number(p.totalCents)||0;
     const per=Number(p.installmentCents)||0;
     const base=perMode?per:Math.floor(total/count);
-    const rows=[];
+    const rows=[],excluded=new Set((Array.isArray(p.excludedNumbers)?p.excludedNumbers:[]).map(Number));
     for(let i=next;i<=count;i++){
+      if(excluded.has(i)) continue;
       const amount=perMode?per:(i===count?total-(base*(count-1)):base);
       rows.push({
         id:`${p.id}_${i}`,purchaseId:p.id,installmentNumber:i,description:p.description,
@@ -52,7 +53,7 @@
   }
 
   function recurringOccurrence(r,k){
-    if(!live(r)||r.active===false||!r.startDate||k<ym(r.startDate)||(r.endDate&&k>ym(r.endDate))) return null;
+    if(!live(r)||r.active===false||!r.startDate||k<ym(r.startDate)||(r.endDate&&k>ym(r.endDate))||(Array.isArray(r.skippedMonths)&&r.skippedMonths.includes(k))) return null;
     const ov=r.monthOverrides?.[k]||{};
     let date;
     if(ov.date) date=ov.date;
@@ -73,7 +74,13 @@
   }
 
   function monthProjection(data,k,today=ymd()){
-    const tx=(data.transactions||[]).filter(live).filter(t=>ym(t.date)===k);
+    const installmentMap=new Map((data.installments||[]).filter(Boolean).map(x=>[x.id,x]));
+    const recurringMap=new Map((data.recurring||[]).filter(Boolean).map(x=>[x.id,x]));
+    const tx=(data.transactions||[]).filter(live).filter(t=>ym(t.date)===k).filter(t=>{
+      if(t.purchaseId&&Number(t.installmentNumber)>0){const p=installmentMap.get(t.purchaseId),n=Number(t.installmentNumber);if(p&&(n>Number(p.count||1)||(Array.isArray(p.excludedNumbers)&&p.excludedNumbers.map(Number).includes(n))))return false}
+      if(t.recurringId){const r=recurringMap.get(t.recurringId);if(r&&Array.isArray(r.skippedMonths)&&r.skippedMonths.includes(k))return false}
+      return true;
+    });
     const rec=(data.recurring||[]).map(r=>recurringOccurrence(r,k)).filter(Boolean);
     const ins=(data.installments||[]).filter(live).flatMap(installmentSchedule).filter(x=>ym(x.date)===k);
     const paidRecurring=new Set(tx.filter(t=>t.recurringId).map(t=>t.recurringId));
