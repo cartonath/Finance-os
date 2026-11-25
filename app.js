@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_META=Object.freeze({version:'1.9.3',build:'2026-11-13.01',channel:'Stable'});
+const APP_META=Object.freeze({version:'1.9.4',build:'2026-11-25.01',channel:'Stable'});
 const C=FinanceCore;
 const DB='finance-os-db';
 const DB_VERSION=5;
@@ -177,7 +177,14 @@ function normalizeLoadedState(){
   }));
   state.installments=(state.installments||[]).filter(Boolean).map(x=>{
     const count=Math.max(1,Number(x.count)||1),total=Number(x.totalCents)||0,per=Number(x.installmentCents)||Math.floor(total/count);
-    return {...x,count,nextNumber:Math.max(1,Math.min(count,Number(x.nextNumber)||1)),amountMode:x.amountMode||'total',installmentCents:per,totalCents:total||per*count,description:x.description||'Parcelamento',startDate:x.startDate||C.ymd(),excludedNumbers:[...new Set((Array.isArray(x.excludedNumbers)?x.excludedNumbers:[]).map(Number).filter(n=>Number.isInteger(n)&&n>=1&&n<=count))].sort((a,b)=>a-b)};
+    const amountOverrides={};
+    if(x.amountOverrides&&typeof x.amountOverrides==='object'){
+      for(const [k,v] of Object.entries(x.amountOverrides)){
+        const n=Number(k),c=Number(v);
+        if(Number.isInteger(n)&&n>=1&&n<=count&&Number.isFinite(c)&&c>=0)amountOverrides[n]=c;
+      }
+    }
+    return {...x,count,nextNumber:Math.max(1,Math.min(count,Number(x.nextNumber)||1)),amountMode:x.amountMode||'total',installmentCents:per,totalCents:total||per*count,description:x.description||'Parcelamento',startDate:x.startDate||C.ymd(),excludedNumbers:[...new Set((Array.isArray(x.excludedNumbers)?x.excludedNumbers:[]).map(Number).filter(n=>Number.isInteger(n)&&n>=1&&n<=count))].sort((a,b)=>a-b),amountOverrides,amountScopeVersion:Number(x.amountScopeVersion)||0};
   });
   state.cards=(state.cards||[]).filter(Boolean).map(x=>({
     ...x,name:x.name||'Cartão',limitCents:Number(x.limitCents)||0,closingDay:Number(x.closingDay)||31,dueDay:Number(x.dueDay)||1,
@@ -585,7 +592,7 @@ function quickForUpcoming(el){
     const actions=[];if(plannedId)actions.push({icon:'✓',label:'Marcar parcela como paga',run:()=>payPlanned(plannedId)});
     const planned=movementRows().find(t=>t.id===plannedId&&t.planned),n=Number(planned?.installmentNumber||planned?.number||0);
     if(n)actions.push({icon:'×',label:Number(x.count)===1?'Excluir esta conta':'Excluir só esta parcela',help:'As demais parcelas continuam.',run:()=>deleteInstallmentOccurrence(purchaseId,n,planned?.date||'')});
-    actions.push({icon:'✎',label:'Editar dívida / parcelamento',run:()=>editInstallment(purchaseId)},{icon:'×',label:'Arquivar dívida / parcelamento',run:()=>deleteManaged('installments',purchaseId)});
+    actions.push({icon:'✎',label:n?'Editar esta parcela / parcelamento':'Editar dívida / parcelamento',run:()=>editInstallment(purchaseId,n)},{icon:'×',label:'Arquivar dívida / parcelamento',run:()=>deleteManaged('installments',purchaseId)});
     openQuickActions(x.description,actions);
   }
 }
@@ -1042,6 +1049,37 @@ function showInvestments(){
   $$('[data-edit-invest]').forEach(b=>b.onclick=()=>editInvestment(b.dataset.editInvest));$$('[data-del-invest]').forEach(b=>b.onclick=()=>deleteManaged('recurring',b.dataset.delInvest));open('listDialog');
 }
 
+function installmentBaseAmount(p){
+  const count=Math.max(1,Number(p?.count)||1);
+  return p?.amountMode==='per_installment'?(Number(p?.installmentCents)||0):Math.floor((Number(p?.totalCents)||0)/count);
+}
+function installmentAmountAt(p,n){
+  const override=Number(p?.amountOverrides?.[n]);
+  if(Number.isFinite(override)&&override>=0)return override;
+  const row=C.installmentSchedule(p||{}).find(x=>Number(x.installmentNumber)===Number(n));
+  return Number(row?.amountCents)||installmentBaseAmount(p);
+}
+function priorSeriesAmountForSingleEdit(p,n){
+  const base=installmentBaseAmount(p);
+  if(Number(p?.amountScopeVersion)>=1)return base;
+  const previous=state.transactions
+    .filter(t=>!t.deletedAt&&t.purchaseId===p.id&&Number(t.installmentNumber)>0&&Number(t.installmentNumber)<Number(n)&&Number(t.amountCents)>0)
+    .sort((a,b)=>Number(b.installmentNumber)-Number(a.installmentNumber))[0];
+  return previous&&Number(previous.amountCents)!==base?Number(previous.amountCents):base;
+}
+function chooseInstallmentAmountScope(number,count){
+  return new Promise(resolve=>{
+    const dlg=$('#quickActionsDialog'),title=$('#quickActionsTitle'),body=$('#quickActionsBody');
+    let settled=false;
+    const finish=value=>{if(settled)return;settled=true;resolve(value)};
+    title.textContent='Onde aplicar este valor?';
+    body.innerHTML=`<button type="button" data-installment-scope="one"><span>1</span><b>Só esta parcela (${number}/${count})</b><small>As outras parcelas mantêm o valor normal.</small></button><button type="button" data-installment-scope="all"><span>∞</span><b>Todas as parcelas</b><small>Atualiza o valor padrão do parcelamento inteiro.</small></button>`;
+    $$('[data-installment-scope]').forEach(b=>b.onclick=()=>{const value=b.dataset.installmentScope;finish(value);close('quickActionsDialog')});
+    const onClose=()=>{dlg.removeEventListener('close',onClose);finish(null)};
+    dlg.addEventListener('close',onClose);
+    open('quickActionsDialog');
+  });
+}
 function syncInstallmentMode(){
   const parcelled=$('#instIsParcelled').checked,totalMode=$('#instForm').dataset.amountMode==='total';
   $('#instParcelFields').classList.toggle('hidden',!parcelled);const label=$('#instAmountLabel'),input=$('#instTotal');
@@ -1057,40 +1095,118 @@ function updateInstPreview(){
   $('#instPreview').textContent=`${count}x de aproximadamente ${C.money(per)} · total ${C.money(total)} · faltam ${count-next+1} parcela${count-next+1===1?'':'s'}.`;
 }
 async function saveInstallment(e){
-  e.preventDefault();const editId=$('#instEditId').value,prior=editId?state.installments.find(x=>x.id===editId&&!x.deletedAt):null,raw=C.toCents($('#instTotal').value),parcelled=$('#instIsParcelled').checked,count=parcelled?Number($('#instCount').value):1,next=parcelled?(Number($('#instNextNumber').value)||1):1,totalMode=$('#instForm').dataset.amountMode==='total';
+  e.preventDefault();
+  const editId=$('#instEditId').value,
+    prior=editId?state.installments.find(x=>x.id===editId&&!x.deletedAt):null,
+    raw=C.toCents($('#instTotal').value),
+    parcelled=$('#instIsParcelled').checked,
+    count=parcelled?Number($('#instCount').value):1,
+    next=parcelled?(Number($('#instNextNumber').value)||1):1,
+    totalMode=$('#instForm').dataset.amountMode==='total',
+    targetNumber=Number($('#instForm').dataset.editOccurrence||0);
   if(raw<=0||count<1||(parcelled&&count<2)||next<1||next>count)return alert(parcelled?'Confira valor, quantidade e parcela atual.':'Confira o valor e o vencimento.');
-  const per=parcelled&&totalMode?Math.floor(raw/count):raw,total=parcelled?(totalMode?raw:raw*count):raw;
-  const id=editId||C.uid('inst'),description=$('#instDescription').value.trim(),startDate=$('#instStart').value;if(!description||!startDate)return alert('Confira descrição e vencimento.');
+  const enteredPer=parcelled&&totalMode?Math.floor(raw/count):raw,
+    enteredTotal=parcelled?(totalMode?raw:raw*count):raw,
+    id=editId||C.uid('inst'),
+    description=$('#instDescription').value.trim(),
+    startDate=$('#instStart').value;
+  if(!description||!startDate)return alert('Confira descrição e vencimento.');
+
+  let amountScope='all';
+  if(prior&&parcelled&&!totalMode&&targetNumber>=1&&targetNumber<=count){
+    amountScope=await chooseInstallmentAmountScope(targetNumber,count);
+    if(!amountScope)return;
+  }
+
   const extras=prior?state.transactions.filter(t=>!t.deletedAt&&t.purchaseId===id&&Number(t.installmentNumber)>count):[];
   if(extras.length&&!confirm(`Você reduziu o total para ${count}. ${extras.length} parcela${extras.length===1?'':'s'} registrada${extras.length===1?'':'s'} acima desse número será${extras.length===1?'':'ão'} removida${extras.length===1?'':'s'} para não existir algo como 12/11. Continuar?`))return;
-  const updatedInstallment={...(prior||{}),id,description,amountMode:parcelled&&totalMode?'total':'per_installment',installmentCents:per,totalCents:total,count,nextNumber:next,startDate,categoryId:'outros',subcategory:'',cardId:prior?.cardId||'',excludedNumbers:[...new Set((prior?.excludedNumbers||[]).map(Number).filter(n=>n>=1&&n<=count))].sort((a,b)=>a-b),createdAt:prior?.createdAt||nowIso(),updatedAt:editId?nowIso():''};
-  const purchaseSummary=state.transactions.find(t=>!t.deletedAt&&t.creditPurchaseSummary&&t.purchaseId===id),at=nowIso(),ops=[{store:'installments',value:updatedInstallment}],balance=confirmedBalanceRecord();let delta=0;
-  if(purchaseSummary)ops.push({store:'transactions',value:{...purchaseSummary,description,amountCents:total,cardId:updatedInstallment.cardId,updatedAt:at}});
-  for(const tx of extras){const oldEpoch=txAppliedEpoch(tx);if(balance&&oldEpoch===balance.epoch)delta-=cashEffect(tx);ops.push({store:'transactions',value:{...tx,deletedAt:at,occurrenceDeletedAt:at,occurrenceDeletedKind:'installment',occurrenceDeletedReason:'count-reduced',occurrenceDeletedBalanceEpoch:oldEpoch,balanceAppliedEpoch:'',availableAppliedEpoch:'',updatedAt:at}})}
+
+  let storedPer=enteredPer,storedTotal=enteredTotal,amountOverrides={};
+  if(prior&&prior.amountOverrides&&typeof prior.amountOverrides==='object'){
+    for(const [k,v] of Object.entries(prior.amountOverrides)){
+      const n=Number(k),c=Number(v);
+      if(Number.isInteger(n)&&n>=1&&n<=count&&Number.isFinite(c)&&c>=0)amountOverrides[n]=c;
+    }
+  }
+
+  if(prior&&parcelled&&!totalMode&&targetNumber>=1&&targetNumber<=count&&amountScope==='one'){
+    let seriesBase=priorSeriesAmountForSingleEdit(prior,targetNumber);
+    const oldOccurrence=installmentAmountAt(prior,targetNumber);
+    if(Number(prior.amountScopeVersion)<1&&seriesBase===installmentBaseAmount(prior)&&seriesBase===oldOccurrence&&enteredPer===oldOccurrence){
+      const normal=prompt(`Qual valor deve continuar nas OUTRAS parcelas de ${description}?`,(seriesBase/100).toFixed(2).replace('.',','));
+      if(normal===null)return;
+      const cents=C.toCents(normal);if(cents<=0)return alert('Informe o valor normal das demais parcelas.');
+      seriesBase=cents;
+    }
+    storedPer=seriesBase;
+    storedTotal=seriesBase*count;
+    amountOverrides[targetNumber]=enteredPer;
+  }else if(prior&&parcelled&&!totalMode&&targetNumber>=1&&targetNumber<=count&&amountScope==='all'){
+    storedPer=enteredPer;
+    storedTotal=enteredPer*count;
+    amountOverrides={};
+  }else if(prior&&parcelled&&!totalMode&&targetNumber===0){
+    storedPer=enteredPer;
+    storedTotal=enteredPer*count;
+    amountOverrides={};
+  }else if(totalMode){
+    amountOverrides={};
+  }
+
+  const updatedInstallment={
+    ...(prior||{}),id,description,
+    amountMode:parcelled&&totalMode?'total':'per_installment',
+    installmentCents:storedPer,totalCents:storedTotal,count,nextNumber:next,startDate,
+    categoryId:'outros',subcategory:'',cardId:prior?.cardId||'',
+    excludedNumbers:[...new Set((prior?.excludedNumbers||[]).map(Number).filter(n=>n>=1&&n<=count))].sort((a,b)=>a-b),
+    amountOverrides,amountScopeVersion:1,
+    createdAt:prior?.createdAt||nowIso(),updatedAt:editId?nowIso():''
+  };
+  const purchaseSummary=state.transactions.find(t=>!t.deletedAt&&t.creditPurchaseSummary&&t.purchaseId===id),
+    at=nowIso(),
+    ops=[{store:'installments',value:updatedInstallment}],
+    balance=confirmedBalanceRecord();
+  let delta=0;
+  if(purchaseSummary)ops.push({store:'transactions',value:{...purchaseSummary,description,amountCents:storedTotal,cardId:updatedInstallment.cardId,updatedAt:at}});
+  for(const tx of extras){
+    const oldEpoch=txAppliedEpoch(tx);if(balance&&oldEpoch===balance.epoch)delta-=cashEffect(tx);
+    ops.push({store:'transactions',value:{...tx,deletedAt:at,occurrenceDeletedAt:at,occurrenceDeletedKind:'installment',occurrenceDeletedReason:'count-reduced',occurrenceDeletedBalanceEpoch:oldEpoch,balanceAppliedEpoch:'',availableAppliedEpoch:'',updatedAt:at}});
+  }
   if(prior&&count>Number(prior.count||0)){
     for(const tx of state.transactions.filter(t=>t.deletedAt&&t.purchaseId===id&&t.occurrenceDeletedReason==='count-reduced'&&Number(t.installmentNumber)<=count)){
-      const oldEpoch=tx.occurrenceDeletedBalanceEpoch||'',restored={...tx,deletedAt:'',occurrenceDeletedAt:'',occurrenceDeletedKind:'',occurrenceDeletedReason:'',occurrenceDeletedBalanceEpoch:'',updatedAt:at,balanceAppliedEpoch:''};if(balance&&oldEpoch===balance.epoch){delta+=cashEffect(restored);if(cashEffect(restored))restored.balanceAppliedEpoch=balance.epoch}ops.push({store:'transactions',value:restored});
+      const oldEpoch=tx.occurrenceDeletedBalanceEpoch||'',
+        restored={...tx,deletedAt:'',occurrenceDeletedAt:'',occurrenceDeletedKind:'',occurrenceDeletedReason:'',occurrenceDeletedBalanceEpoch:'',updatedAt:at,balanceAppliedEpoch:''};
+      if(balance&&oldEpoch===balance.epoch){delta+=cashEffect(restored);if(cashEffect(restored))restored.balanceAppliedEpoch=balance.epoch}
+      ops.push({store:'transactions',value:restored});
     }
   }
   await atomicOpsWithBalance(ops,delta,balance?.epoch||'');
+
   let inferredPrevious=false;
   if(!editId&&parcelled&&next>1){
     const previousDate=C.addMonths(startDate,-1),previousNumber=next-1,todayMonth=C.ym(C.ymd()),nextMonth=C.ym(startDate),already=state.transactions.some(t=>!t.deletedAt&&t.purchaseId===id&&Number(t.installmentNumber)===previousNumber);
-    if(nextMonth>todayMonth&&C.ym(previousDate)===todayMonth&&!already){await putOne('transactions',{id:C.uid('tx'),type:'expense',amountCents:per,description,categoryId:'outros',subcategory:'',date:previousDate,paymentMethod:'Outro',status:'paid',recurringId:'',purchaseId:id,installmentNumber:previousNumber,cardId:'',createdAt:nowIso(),balanceAppliedEpoch:''});inferredPrevious=true}
+    if(nextMonth>todayMonth&&C.ym(previousDate)===todayMonth&&!already){
+      await putOne('transactions',{id:C.uid('tx'),type:'expense',amountCents:storedPer,description,categoryId:'outros',subcategory:'',date:previousDate,paymentMethod:'Outro',status:'paid',recurringId:'',purchaseId:id,installmentNumber:previousNumber,cardId:'',createdAt:nowIso(),balanceAppliedEpoch:''});
+      inferredPrevious=true;
+    }
   }
-  $('#instEditId').value='';close('instDialog');e.target.reset();await refresh();showToast(editId?(parcelled?'Parcelamento atualizado.':'Conta atualizada.'):(inferredPrevious?`Parcela ${next-1}/${count} registrada como já paga.`:parcelled?'Dívida parcelada criada.':'Conta a pagar criada.'));
+  $('#instEditId').value='';$('#instForm').dataset.editOccurrence='';close('instDialog');e.target.reset();await refresh();
+  if(editId&&amountScope==='one')showToast(`Só a parcela ${targetNumber}/${count} foi atualizada.`);
+  else showToast(editId?(parcelled?'Parcelamento atualizado.':'Conta atualizada.'):(inferredPrevious?`Parcela ${next-1}/${count} registrada como já paga.`:parcelled?'Dívida parcelada criada.':'Conta a pagar criada.'));
 }
 
-function editInstallment(id){
-  const x=state.installments.find(t=>t.id===id&&!t.deletedAt);if(!x)return;close('listDialog');$('#instEditId').value=x.id;const parcelled=Number(x.count)>1,totalMode=!!x.cardId&&x.amountMode==='total';
-  $('#instForm').dataset.amountMode=totalMode?'total':'per';$('#instDialogTitle').textContent=totalMode?'Editar compra parcelada':parcelled?'Editar parcelamento':'Editar conta / dívida';
-  const shown=totalMode?x.totalCents:(x.amountMode==='per_installment'?x.installmentCents:Math.floor((x.totalCents||0)/(x.count||1)));$('#instTotal').value=(shown/100).toFixed(2).replace('.',',');$('#instIsParcelled').checked=parcelled;$('#instCount').value=parcelled?x.count:2;$('#instNextNumber').value=parcelled?(x.nextNumber||1):1;$('#instStart').value=x.startDate;$('#instDescription').value=x.description;syncInstallmentMode();open('instDialog');
+function editInstallment(id,occurrenceNumber=0){
+  const x=state.installments.find(t=>t.id===id&&!t.deletedAt);if(!x)return;close('listDialog');$('#instEditId').value=x.id;const parcelled=Number(x.count)>1,totalMode=!!x.cardId&&x.amountMode==='total',n=Number(occurrenceNumber)||0;
+  $('#instForm').dataset.amountMode=totalMode?'total':'per';$('#instForm').dataset.editOccurrence=(!totalMode&&parcelled&&n>=1&&n<=x.count)?String(n):'';
+  $('#instDialogTitle').textContent=totalMode?'Editar compra parcelada':($('#instForm').dataset.editOccurrence?`Editar parcela ${n}/${x.count}`:parcelled?'Editar parcelamento':'Editar conta / dívida');
+  const shown=totalMode?x.totalCents:($('#instForm').dataset.editOccurrence?installmentAmountAt(x,n):(x.amountMode==='per_installment'?x.installmentCents:Math.floor((x.totalCents||0)/(x.count||1))));
+  $('#instTotal').value=(shown/100).toFixed(2).replace('.',',');$('#instIsParcelled').checked=parcelled;$('#instCount').value=parcelled?x.count:2;$('#instNextNumber').value=parcelled?(x.nextNumber||1):1;$('#instStart').value=x.startDate;$('#instDescription').value=x.description;syncInstallmentMode();open('instDialog');
 }
 
 function showList(kind){
   const recurring=kind==='recurring';$('#listTitle').textContent=recurring?'Contas recorrentes':'Parcelamentos e dívidas';
   const rows=(recurring?state.recurring.filter(x=>x.type!=='investment'):state.installments).filter(x=>!x.deletedAt);
-  $('#listContent').innerHTML=rows.length?rows.map(x=>recurring?`<div class="history-row"><div class="history-row-main"><b>${esc(x.description)}</b><small>${C.money(x.amountCents)} · ${x.variable?'valor variável · ':''}${x.recurrenceRule==='first_monday'?'1ª segunda-feira':'dia '+x.day}${x.endDate?' · até '+new Date(x.endDate+'T12:00:00').toLocaleDateString('pt-BR'):''}${(x.skippedMonths||[]).length?` · ${(x.skippedMonths||[]).length} mês(es) removido(s)`:''}</small></div><div class="move-side"><button class="mini" data-edit-rec="${esc(x.id)}">Editar</button>${(x.skippedMonths||[]).length?`<button class="mini" data-restore-rec="${esc(x.id)}">Restaurar meses</button>`:''}<button class="mini danger" data-del-rec="${esc(x.id)}">Arquivar</button></div></div>`:(()=>{const r=C.remainingInstallments(x),excluded=(x.excludedNumbers||[]).length;return`<div class="history-row"><div class="history-row-main"><b>${esc(x.description)}</b><small>${x.count}x · próxima ${x.nextNumber}/${x.count} · termina ${r.endDate?new Date(r.endDate+'T12:00:00').toLocaleDateString('pt-BR'):'—'}${excluded?` · ${excluded} parcela(s) removida(s)`:''}</small></div><div class="move-side"><strong>${C.money(x.installmentCents||Math.floor(x.totalCents/x.count))}</strong><div><button class="mini" data-edit-inst="${esc(x.id)}">Editar</button>${excluded?`<button class="mini" data-restore-inst="${esc(x.id)}">Restaurar parcelas</button>`:''}<button class="mini danger" data-del-inst="${esc(x.id)}">Arquivar</button></div></div></div>`})()).join(''):'<div class="empty-state"><b>Nenhum cadastro ainda</b></div>';
+  $('#listContent').innerHTML=rows.length?rows.map(x=>recurring?`<div class="history-row"><div class="history-row-main"><b>${esc(x.description)}</b><small>${C.money(x.amountCents)} · ${x.variable?'valor variável · ':''}${x.recurrenceRule==='first_monday'?'1ª segunda-feira':'dia '+x.day}${x.endDate?' · até '+new Date(x.endDate+'T12:00:00').toLocaleDateString('pt-BR'):''}${(x.skippedMonths||[]).length?` · ${(x.skippedMonths||[]).length} mês(es) removido(s)`:''}</small></div><div class="move-side"><button class="mini" data-edit-rec="${esc(x.id)}">Editar</button>${(x.skippedMonths||[]).length?`<button class="mini" data-restore-rec="${esc(x.id)}">Restaurar meses</button>`:''}<button class="mini danger" data-del-rec="${esc(x.id)}">Arquivar</button></div></div>`:(()=>{const r=C.remainingInstallments(x),excluded=(x.excludedNumbers||[]).length;return`<div class="history-row"><div class="history-row-main"><b>${esc(x.description)}</b><small>${x.count}x · próxima ${x.nextNumber}/${x.count} · termina ${r.endDate?new Date(r.endDate+'T12:00:00').toLocaleDateString('pt-BR'):'—'}${excluded?` · ${excluded} parcela(s) removida(s)`:''}${Object.keys(x.amountOverrides||{}).length?` · ${Object.keys(x.amountOverrides||{}).length} parcela(s) com valor diferente`:''}</small></div><div class="move-side"><strong>${C.money(x.installmentCents||Math.floor(x.totalCents/x.count))}</strong><div><button class="mini" data-edit-inst="${esc(x.id)}">Editar</button>${excluded?`<button class="mini" data-restore-inst="${esc(x.id)}">Restaurar parcelas</button>`:''}<button class="mini danger" data-del-inst="${esc(x.id)}">Arquivar</button></div></div></div>`})()).join(''):'<div class="empty-state"><b>Nenhum cadastro ainda</b></div>';
   $$('[data-edit-rec]').forEach(b=>b.onclick=()=>editRecurring(b.dataset.editRec));$$('[data-del-rec]').forEach(b=>b.onclick=()=>deleteManaged('recurring',b.dataset.delRec));$$('[data-restore-rec]').forEach(b=>b.onclick=()=>restoreRecurringOccurrences(b.dataset.restoreRec));$$('[data-edit-inst]').forEach(b=>b.onclick=()=>editInstallment(b.dataset.editInst));$$('[data-del-inst]').forEach(b=>b.onclick=()=>deleteManaged('installments',b.dataset.delInst));$$('[data-restore-inst]').forEach(b=>b.onclick=()=>restoreInstallmentOccurrences(b.dataset.restoreInst));open('listDialog');
 }
 
@@ -1148,7 +1264,10 @@ function runIntegrityAudit(){
     if(t.cardId&&!cardIds.has(t.cardId))issues.push(`Movimentação "${t.description}": cartão não encontrado`);
   }
   for(const r of state.recurring.filter(x=>!x.deletedAt)){if(r.endDate&&r.endDate<r.startDate)issues.push(`Recorrência "${r.description}": termina antes de começar`)}
-  for(const p of state.installments.filter(x=>!x.deletedAt)){if(p.count<1||p.nextNumber<1||p.nextNumber>p.count||p.installmentCents<0)issues.push(`Parcelamento "${p.description}": sequência inválida`)}
+  for(const p of state.installments.filter(x=>!x.deletedAt)){
+    if(p.count<1||p.nextNumber<1||p.nextNumber>p.count||p.installmentCents<0)issues.push(`Parcelamento "${p.description}": sequência inválida`);
+    for(const [n,v] of Object.entries(p.amountOverrides||{})){if(Number(n)<1||Number(n)>Number(p.count)||!Number.isFinite(Number(v))||Number(v)<0)issues.push(`Parcelamento "${p.description}": valor especial inválido na parcela ${n}`)}
+  }
   for(const c of state.cards.filter(x=>!x.deletedAt)){
     if(c.limitCents<=0||c.closingDay<1||c.closingDay>31||c.dueDay<1||c.dueDay>31)issues.push(`Cartão "${c.name}": configuração inválida`);
     for(const cycle of Object.keys(c.invoicePaid||{})){
@@ -1183,7 +1302,7 @@ function bind(){
   $('#txForm').onsubmit=saveTx;$$('[data-payment]').forEach(b=>b.onclick=()=>syncPaymentUI(b.dataset.payment));
   $('#txInstallmentCheck').onchange=()=>$('#txInstallmentFields').classList.toggle('hidden',!$('#txInstallmentCheck').checked);
 
-  $('#newInstallment').onclick=()=>{close('addDialog');$('#instForm').reset();$('#instForm').dataset.amountMode='per';$('#instEditId').value='';$('#instDialogTitle').textContent='Tenho que pagar';$('#instStart').value=defaultDateForSelectedMonth();$('#instCount').value=2;$('#instNextNumber').value=1;$('#instIsParcelled').checked=false;syncInstallmentMode();open('instDialog');setTimeout(()=>$('#instTotal').focus(),80)};
+  $('#newInstallment').onclick=()=>{close('addDialog');$('#instForm').reset();$('#instForm').dataset.amountMode='per';$('#instForm').dataset.editOccurrence='';$('#instEditId').value='';$('#instDialogTitle').textContent='Tenho que pagar';$('#instStart').value=defaultDateForSelectedMonth();$('#instCount').value=2;$('#instNextNumber').value=1;$('#instIsParcelled').checked=false;syncInstallmentMode();open('instDialog');setTimeout(()=>$('#instTotal').focus(),80)};
   $('#instForm').onsubmit=saveInstallment;$('#instTotal').oninput=updateInstPreview;$('#instCount').oninput=updateInstPreview;$('#instNextNumber').oninput=updateInstPreview;$('#instIsParcelled').onchange=syncInstallmentMode;
 
   $('#newRecurring').onclick=()=>{close('addDialog');$('#recEditId').value='';$('#recDialogTitle').textContent='Conta recorrente';$('#recForm').reset();$('#recStart').value=defaultDateForSelectedMonth();open('recDialog')};$('#recForm').onsubmit=saveRecurring;
@@ -1209,5 +1328,5 @@ function bind(){
   await loadState();
   bind();updatePinStatus();refreshCardSelects();renderHome();renderBackupStatus();
   document.body.dataset.appReady='1';if(pinConfig())lockApp();
-  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.3',{updateViaCache:'none'}).catch(console.warn);
+  if('serviceWorker'in navigator)navigator.serviceWorker.register('./sw.js?v=1.9.4',{updateViaCache:'none'}).catch(console.warn);
 })().catch(e=>{console.error('BOOT_FATAL',e);document.body.dataset.appReady='0';alert('O Finance OS não conseguiu iniciar. Seus dados locais permanecem no aparelho. Atualize para a correção mais recente.')});

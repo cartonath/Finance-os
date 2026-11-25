@@ -37,7 +37,8 @@
     const rows=[],excluded=new Set((Array.isArray(p.excludedNumbers)?p.excludedNumbers:[]).map(Number));
     for(let i=next;i<=count;i++){
       if(excluded.has(i)) continue;
-      const amount=perMode?per:(i===count?total-(base*(count-1)):base);
+      const custom=Number(p.amountOverrides?.[i]);
+      const amount=Number.isFinite(custom)&&custom>=0?custom:(perMode?per:(i===count?total-(base*(count-1)):base));
       rows.push({
         id:`${p.id}_${i}`,purchaseId:p.id,installmentNumber:i,description:p.description,
         categoryId:p.categoryId,subcategory:p.subcategory||'',cardId:p.cardId||'',

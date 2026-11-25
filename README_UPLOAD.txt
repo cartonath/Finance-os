@@ -1,23 +1,22 @@
-FINANCE OS v1.9.3 — CONTROLE POR OCORRÊNCIA
-Build: 2026-11-13.01
+FINANCE OS v1.9.4 — VALOR POR PARCELA
+Build: 2026-11-25.01
 
 Substitua os 9 arquivos do repositório pelos arquivos deste pacote.
 O GitHub Actions já configurado publica automaticamente após o commit.
 
 CORREÇÕES PRINCIPAIS
-- Qualquer parcela pode ser removida individualmente sem apagar o parcelamento inteiro.
-- Conta recorrente pode ter somente um mês removido, preservando os demais.
-- Pagamentos já marcados também oferecem “Excluir só esta parcela/mês”.
-- Parcelas/meses removidos podem ser restaurados pelos gerenciadores em Ajustes.
-- Reduzir um parcelamento de 12 para 11 remove ocorrências acima do novo total, impedindo estados impossíveis como 12/11.
-- A migração corrige automaticamente ocorrências antigas acima do total de parcelas.
-- Ao aumentar novamente o total, ocorrências removidas automaticamente pela redução podem ser recuperadas.
-- Formulários novos usam por padrão o mês que está sendo visualizado, evitando salvar em novembro enquanto a tela está em dezembro.
-- “Gastei agora” deixa explícito que vai para o Histórico; “Tenho que pagar” deixa explícito que aparece na Home.
+- Ao editar uma parcela pela Home, o Finance OS pergunta onde aplicar o novo valor:
+  • Só esta parcela;
+  • Todas as parcelas.
+- Parcelas individuais podem ter valores diferentes sem alterar o restante do parcelamento.
+- Exemplo: Asad Julia 2/5 pode ficar R$ 104,00 e 3/5, 4/5 e 5/5 continuarem em R$ 52,00.
+- Para parcelamentos antigos que já tiveram o valor global sobrescrito, o app tenta recuperar o valor normal pela parcela anterior já paga.
+- Quando não existe histórico suficiente para descobrir o valor antigo, o app pergunta uma vez qual valor deve permanecer nas demais parcelas.
+- Editar o parcelamento pelo gerenciador continua sendo uma alteração global.
+- Exclusão/restauração por parcela da v1.9.3 continua preservada.
 
 REGRESSÕES-ALVO
-- Empréstimo 11/11 em novembro não pode gerar 12/11 em dezembro.
-- Excluir parcela N não altera N-1 ou N+1.
-- Desmarcar pagamento volta a parcela para planejada; excluir a ocorrência não volta.
-- Excluir mês de recorrência não exclui a regra.
-- Um lançamento criado enquanto se visualiza outro mês nasce naquele mês por padrão.
+- Override em 2/5 não altera 3/5, 4/5 ou 5/5.
+- Alteração global limpa overrides anteriores e aplica o novo padrão.
+- Backup/restore preserva valores especiais por parcela.
+- Redução de quantidade continua removendo ocorrências impossíveis acima do total.
